@@ -266,7 +266,7 @@ Arguments:
              (props (cdr tool-spec)))
         (setq server-and-body
               `(mcp-server-lib-test--register-tool ,handler ,@props
-                 ,server-and-body))))
+                                                   ,server-and-body))))
     server-and-body))
 
 (defmacro mcp-server-lib-test--register-resource (uri handler &rest props-and-body)
@@ -303,14 +303,14 @@ Arguments:
 
 (defun mcp-server-lib-test--find-resource-by-uri (uri resources)
   "Find a resource in RESOURCES array by its URI field."
-  (seq-find (lambda (r) (equal (alist-get 'uri r) uri)) resources))
+  (seq-find (lambda (r) (equal (plist-get r :uri) uri)) resources))
 
 (defun mcp-server-lib-test--find-resource-by-uri-template (uri-template
-  resources)
+                                                           resources)
   "Find a resource in RESOURCES array with URI-TEMPLATE field.
 The URI-TEMPLATE is searched as uriTemplate in JSON."
-  (seq-find (lambda (r) (equal (alist-get 'uriTemplate r) uri-template))
-  resources))
+  (seq-find (lambda (r) (equal (plist-get r :uriTemplate) uri-template))
+            resources))
 
 (defun mcp-server-lib-test--is-template-resource (resource-spec)
   "Return non-nil if RESOURCE-SPEC represents a template resource.
@@ -361,7 +361,7 @@ Arguments:
   ;; Build the verification code
   ;; Separate direct resources and templates
   (let* ((direct-resources (cl-remove-if #'mcp-server-lib-test--is-template-resource
-                                          resources))
+                                         resources))
          (template-resources (cl-set-difference resources direct-resources :test #'equal))
          (verification-code
           `(progn
@@ -394,7 +394,7 @@ Arguments:
                (props (cddr resource-spec)))
           (setq server-and-body
                 `(mcp-server-lib-test--register-resource ,uri ,handler ,@props
-                   ,server-and-body))))
+                                                         ,server-and-body))))
       server-and-body)))
 
 (defun mcp-server-lib-test--check-jsonrpc-error
@@ -617,15 +617,15 @@ should not include tools or resources fields at all."
   "Test initialize when both tools and resources are registered.
 When both are registered, capabilities should include both fields."
   (mcp-server-lib-test--register-tool
-   #'mcp-server-lib-test--return-string
-   :id "test-tool"
-   :description "Test tool"
+      #'mcp-server-lib-test--return-string
+    :id "test-tool"
+    :description "Test tool"
 
-   (mcp-server-lib-test--register-resource
-    "test://resource"
-    #'mcp-server-lib-test--return-string
-    :name "Test Resource"
-    (mcp-server-lib-ert-with-server :tools t :resources t))))
+    (mcp-server-lib-test--register-resource
+        "test://resource"
+        #'mcp-server-lib-test--return-string
+      :name "Test Resource"
+      (mcp-server-lib-ert-with-server :tools t :resources t))))
 
 
 (ert-deftest mcp-server-lib-test-initialize-old-protocol-version ()
@@ -809,30 +809,30 @@ When both are registered, capabilities should include both fields."
 With reference counting, duplicate registrations should succeed and increment
 the reference count, returning the original tool definition."
   (mcp-server-lib-ert-with-server
-   :tools nil :resources nil
-   (mcp-server-lib-test--register-tool
-    #'mcp-server-lib-test--return-string
-    :id "duplicate-test"
-    :description "First registration"
-
+    :tools nil :resources nil
     (mcp-server-lib-test--register-tool
-     #'mcp-server-lib-test--return-string
-     :id "duplicate-test"
-     :description "Second registration - should be ignored"
-     ;; Tool should be callable after registrations (ref count = 2)
-     (let ((result (mcp-server-lib-test--call-tool "duplicate-test" 1)))
-       (mcp-server-lib-test--check-mcp-server-lib-content-format
-        result "test result")))
+        #'mcp-server-lib-test--return-string
+      :id "duplicate-test"
+      :description "First registration"
+
+      (mcp-server-lib-test--register-tool
+          #'mcp-server-lib-test--return-string
+        :id "duplicate-test"
+        :description "Second registration - should be ignored"
+        ;; Tool should be callable after registrations (ref count = 2)
+        (let ((result (mcp-server-lib-test--call-tool "duplicate-test" 1)))
+          (mcp-server-lib-test--check-mcp-server-lib-content-format
+           result "test result")))
+      
+      ;; After inner macro completes, it unregisters once (ref count goes from 2 to 1)
+      ;; Tool should still be callable because outer registration is still active
+      (let ((result (mcp-server-lib-test--call-tool "duplicate-test" 2)))
+        (mcp-server-lib-test--check-mcp-server-lib-content-format
+         result "test result")))
     
-    ;; After inner macro completes, it unregisters once (ref count goes from 2 to 1)
-    ;; Tool should still be callable because outer registration is still active
-    (let ((result (mcp-server-lib-test--call-tool "duplicate-test" 2)))
-      (mcp-server-lib-test--check-mcp-server-lib-content-format
-       result "test result")))
-   
-   ;; After outer macro completes, it unregisters again (ref count = 0)
-   ;; Tool should no longer be callable
-   (mcp-server-lib-test--verify-tool-not-found "duplicate-test")))
+    ;; After outer macro completes, it unregisters again (ref count = 0)
+    ;; Tool should no longer be callable
+    (mcp-server-lib-test--verify-tool-not-found "duplicate-test")))
 
 (ert-deftest mcp-server-lib-test-register-tool-bytecode ()
   "Test schema generation for a handler loaded as bytecode.
@@ -863,37 +863,37 @@ from a function loaded from bytecode rather than interpreted elisp."
 (ert-deftest mcp-server-lib-test-unregister-tool ()
   "Test that `mcp-server-lib-unregister-tool' removes a tool correctly."
   (mcp-server-lib-ert-with-server
-   :tools nil :resources nil
-   (mcp-server-lib-test--register-tool
-    #'mcp-server-lib-test--return-string
-    :id mcp-server-lib-test--unregister-tool-id
-    :description "Tool for unregister test"
+    :tools nil :resources nil
+    (mcp-server-lib-test--register-tool
+        #'mcp-server-lib-test--return-string
+      :id mcp-server-lib-test--unregister-tool-id
+      :description "Tool for unregister test"
 
-    (mcp-server-lib-test--verify-tool-list-request
-     `((,mcp-server-lib-test--unregister-tool-id
-        .
-        ((description . "Tool for unregister test")
-         (inputSchema . ((type . "object")))))))
+      (mcp-server-lib-test--verify-tool-list-request
+       `((,mcp-server-lib-test--unregister-tool-id
+          .
+          ((description . "Tool for unregister test")
+           (inputSchema . ((type . "object")))))))
 
-    (let ((result
-           (mcp-server-lib-test--call-tool
-            mcp-server-lib-test--unregister-tool-id
-            44)))
-      (mcp-server-lib-test--check-mcp-server-lib-content-format
-       result "test result")))
+      (let ((result
+             (mcp-server-lib-test--call-tool
+              mcp-server-lib-test--unregister-tool-id
+              44)))
+        (mcp-server-lib-test--check-mcp-server-lib-content-format
+         result "test result")))
 
-   ;; After macro cleanup, verify tool is gone
-   (mcp-server-lib-test--verify-tool-list-request '())
-   (mcp-server-lib-test--verify-tool-not-found
-    mcp-server-lib-test--unregister-tool-id)))
+    ;; After macro cleanup, verify tool is gone
+    (mcp-server-lib-test--verify-tool-list-request '())
+    (mcp-server-lib-test--verify-tool-not-found
+     mcp-server-lib-test--unregister-tool-id)))
 
 (ert-deftest mcp-server-lib-test-unregister-tool-nonexistent ()
   "Test that `mcp-server-lib-unregister-tool' returns nil for missing tools."
   (mcp-server-lib-test--register-tool
-   #'mcp-server-lib-test--return-string
-   :id "test-other"
-   :description "Other test tool"
-   (should-not (mcp-server-lib-unregister-tool "nonexistent-tool"))))
+      #'mcp-server-lib-test--return-string
+    :id "test-other"
+    :description "Other test tool"
+    (should-not (mcp-server-lib-unregister-tool "nonexistent-tool"))))
 
 (ert-deftest mcp-server-lib-test-unregister-tool-when-no-tools ()
   "Test `mcp-server-lib-unregister-tool' when no tools are registered."
@@ -1110,7 +1110,7 @@ from a function loaded from bytecode rather than interpreted elisp."
       (should (equal mcp-server-lib-jsonrpc-error-invalid-params
                      (alist-get 'code error-obj)))
       (should (string-match-p "Missing required parameter"
-                               (alist-get 'message error-obj))))))
+                              (alist-get 'message error-obj))))))
 
 (ert-deftest mcp-server-lib-test-tools-call-too-many-params ()
   "Test that calling a tool with extra parameters returns an error."
@@ -1129,7 +1129,7 @@ from a function loaded from bytecode rather than interpreted elisp."
       (should (equal mcp-server-lib-jsonrpc-error-invalid-params
                      (alist-get 'code error-obj)))
       (should (string-match-p "Unexpected parameter"
-                               (alist-get 'message error-obj))))))
+                              (alist-get 'message error-obj))))))
 
 
 (ert-deftest mcp-server-lib-test-tools-list-read-only-hint ()
@@ -1186,8 +1186,8 @@ from a function loaded from bytecode rather than interpreted elisp."
          (id 42)
          (args '(("arg1" . "value1") ("arg2" . "value2")))
          (request
-          (mcp-server-lib-create-tools-call-request
-           tool-name id args))
+           (mcp-server-lib-create-tools-call-request
+            tool-name id args))
          (parsed (json-read-from-string request))
          (params (alist-get 'params parsed)))
     ;; Verify basic JSON-RPC structure
@@ -1209,7 +1209,7 @@ from a function loaded from bytecode rather than interpreted elisp."
   "Test `mcp-server-lib-create-tools-call-request' with default ID."
   (let* ((tool-name "test-tool")
          (request
-          (mcp-server-lib-create-tools-call-request tool-name))
+           (mcp-server-lib-create-tools-call-request tool-name))
          (parsed (json-read-from-string request))
          (params (alist-get 'params parsed)))
     (should (equal "2.0" (alist-get 'jsonrpc parsed)))
@@ -1225,7 +1225,7 @@ from a function loaded from bytecode rather than interpreted elisp."
   (let* ((tool-name "test-tool")
          (id 43)
          (request
-          (mcp-server-lib-create-tools-call-request tool-name id '()))
+           (mcp-server-lib-create-tools-call-request tool-name id '()))
          (parsed (json-read-from-string request))
          (params (alist-get 'params parsed)))
     (should (equal "2.0" (alist-get 'jsonrpc parsed)))
@@ -1369,7 +1369,7 @@ from a function loaded from bytecode rather than interpreted elisp."
          (response `((jsonrpc . "2.0")
                      (id . 123)
                      (result . ((content . [((type . "text")
-                                              (text . ,json-string))])
+                                             (text . ,json-string))])
                                 (isError . :json-false)))))
          (parsed-result (mcp-server-lib-ert-process-tool-response response)))
     ;; Verify the parsed JSON matches expected structure
@@ -1384,7 +1384,7 @@ from a function loaded from bytecode rather than interpreted elisp."
          (response `((jsonrpc . "2.0")
                      (id . 456)
                      (result . ((content . [((type . "text")
-                                              (text . ,error-message))])
+                                             (text . ,error-message))])
                                 (isError . t))))))
     ;; Verify that it signals the expected error with correct message
     (should-error
@@ -1400,15 +1400,15 @@ from a function loaded from bytecode rather than interpreted elisp."
   "Test that `mcp-server-lib-ert-process-tool-response' fails on invalid response structure."
   ;; Test with JSON-RPC error present
   (let ((response-with-error `((jsonrpc . "2.0")
-                                (id . 789)
-                                (error . ((code . -32600)
-                                          (message . "Invalid Request"))))))
+                               (id . 789)
+                               (error . ((code . -32600)
+                                         (message . "Invalid Request"))))))
     (should-error
      (mcp-server-lib-ert-process-tool-response response-with-error)))
   
   ;; Test with missing result field
   (let ((response-no-result `((jsonrpc . "2.0")
-                               (id . 789))))
+                              (id . 789))))
     (should-error
      (mcp-server-lib-ert-process-tool-response response-no-result))))
 
@@ -1689,55 +1689,55 @@ from a function loaded from bytecode rather than interpreted elisp."
 (ert-deftest mcp-server-lib-test-show-metrics ()
   "Test metrics display command."
   (mcp-server-lib-test--with-tools
-   ((#'mcp-server-lib-test--return-string
-     :id "display-test-tool"
-     :description "Tool for testing display"))
-   ;; Generate some metrics
-   (mcp-server-lib-process-jsonrpc
-    (mcp-server-lib-create-tools-list-request 200))
-   (mcp-server-lib-test--call-tool "display-test-tool" 201)
+      ((#'mcp-server-lib-test--return-string
+        :id "display-test-tool"
+        :description "Tool for testing display"))
+    ;; Generate some metrics
+    (mcp-server-lib-process-jsonrpc
+     (mcp-server-lib-create-tools-list-request 200))
+    (mcp-server-lib-test--call-tool "display-test-tool" 201)
 
-   ;; Show metrics
-   (mcp-server-lib-show-metrics)
+    ;; Show metrics
+    (mcp-server-lib-show-metrics)
 
-   ;; Verify buffer exists and contains expected content
-   (with-current-buffer "*MCP Metrics*"
-     (let ((content (buffer-string)))
-       (should (string-match "MCP Usage Metrics" content))
-       (should (string-match "Method Calls:" content))
-       ;; Should have at least 1 tools/list call from our test
-       (should (string-match "tools/list\\s-+\\([0-9]+\\)" content))
-       (let ((tools-list-count
-              (string-to-number (match-string 1 content))))
-         (should (>= tools-list-count 1)))
+    ;; Verify buffer exists and contains expected content
+    (with-current-buffer "*MCP Metrics*"
+      (let ((content (buffer-string)))
+        (should (string-match "MCP Usage Metrics" content))
+        (should (string-match "Method Calls:" content))
+        ;; Should have at least 1 tools/list call from our test
+        (should (string-match "tools/list\\s-+\\([0-9]+\\)" content))
+        (let ((tools-list-count
+               (string-to-number (match-string 1 content))))
+          (should (>= tools-list-count 1)))
 
-       (should (string-match "Tool Usage:" content))
-       ;; Should have exactly 1 call to our test tool
-       (should
-        (string-match
-         "display-test-tool\\s-+1\\s-+0\\s-+0\\.0%" content))
-       (should (string-match "Summary:" content))
-       (should (string-match "Methods: [0-9]+ calls" content))
-       (should (string-match "Tools: [0-9]+ calls" content))))))
+        (should (string-match "Tool Usage:" content))
+        ;; Should have exactly 1 call to our test tool
+        (should
+         (string-match
+          "display-test-tool\\s-+1\\s-+0\\s-+0\\.0%" content))
+        (should (string-match "Summary:" content))
+        (should (string-match "Methods: [0-9]+ calls" content))
+        (should (string-match "Tools: [0-9]+ calls" content))))))
 
 (ert-deftest mcp-server-lib-test-metrics-reset-on-start ()
   "Test that starting the server resets metrics."
   ;; First part: generate metrics and verify they exist
   (mcp-server-lib-ert-with-server :tools nil :resources nil
-                                    (mcp-server-lib-process-jsonrpc
-                                     (mcp-server-lib-create-tools-list-request 100))
-                                    
-                                    ;; Verify metrics exist
-                                    (let ((summary (mcp-server-lib-metrics-summary)))
-                                      (should (stringp summary))
-                                      ;; Should show at least 2 calls (initialize + tools/list)
-                                      (should (string-match "[2-9][0-9]* calls\\|[0-9][0-9]+ calls" summary))))
+    (mcp-server-lib-process-jsonrpc
+     (mcp-server-lib-create-tools-list-request 100))
+    
+    ;; Verify metrics exist
+    (let ((summary (mcp-server-lib-metrics-summary)))
+      (should (stringp summary))
+      ;; Should show at least 2 calls (initialize + tools/list)
+      (should (string-match "[2-9][0-9]* calls\\|[0-9][0-9]+ calls" summary))))
   
   ;; Second part: start server again and verify metrics were reset
   (mcp-server-lib-ert-with-server :tools nil :resources nil
-                                    ;; After server restart, only the initialize call should be counted
-                                    (let ((summary (mcp-server-lib-metrics-summary)))
-                                      (should (string-match "^MCP metrics: [12] calls" summary)))))
+    ;; After server restart, only the initialize call should be counted
+    (let ((summary (mcp-server-lib-metrics-summary)))
+      (should (string-match "^MCP metrics: [12] calls" summary)))))
 
 (ert-deftest mcp-server-lib-test-metrics-on-stop ()
   "Test metrics display on server stop."
@@ -1780,71 +1780,71 @@ from a function loaded from bytecode rather than interpreted elisp."
 (ert-deftest test-mcp-server-lib-register-resource-minimal ()
   "Test registering a resource with only required fields."
   (mcp-server-lib-test--with-resources
-   (("test://minimal"
-     #'mcp-server-lib-test--return-string
-     :name "Minimal Resource"))
-   ;; Verify resource can be read without mime-type
-   (mcp-server-lib-ert-verify-resource-read
-    "test://minimal"
-    '((uri . "test://minimal")
-      (text . "test result")))))
+      (("test://minimal"
+        #'mcp-server-lib-test--return-string
+        :name "Minimal Resource"))
+    ;; Verify resource can be read without mime-type
+    (mcp-server-lib-ert-verify-resource-read
+     "test://minimal"
+     '((uri . "test://minimal")
+       (text . "test result")))))
 
 (ert-deftest test-mcp-server-lib-resources-read ()
   "Test reading a resource."
   (mcp-server-lib-test--with-resources
-   (("test://resource1"
-     #'mcp-server-lib-test--return-string
-     :name "Test Resource"
-     :mime-type "text/plain"))
-   ;; Read the resource
-   (mcp-server-lib-ert-verify-resource-read
-    "test://resource1"
-    '((uri . "test://resource1")
-      (mimeType . "text/plain")
-      (text . "test result")))))
+      (("test://resource1"
+        #'mcp-server-lib-test--return-string
+        :name "Test Resource"
+        :mime-type "text/plain"))
+    ;; Read the resource
+    (mcp-server-lib-ert-verify-resource-read
+     "test://resource1"
+     '((uri . "test://resource1")
+       (mimeType . "text/plain")
+       (text . "test result")))))
 
 (ert-deftest test-mcp-server-lib-resources-read-handler-nil ()
   "Test that resource handler returning nil produces valid response with empty text."
   (mcp-server-lib-test--with-resources
-   (("test://nil-resource"
-     #'mcp-server-lib-test--return-nil
-     :name "Nil Resource"))
-   ;; Read the resource
-   (mcp-server-lib-ert-verify-resource-read
-    "test://nil-resource"
-    '((uri . "test://nil-resource")
-      (text . nil)))))
+      (("test://nil-resource"
+        #'mcp-server-lib-test--return-nil
+        :name "Nil Resource"))
+    ;; Read the resource
+    (mcp-server-lib-ert-verify-resource-read
+     "test://nil-resource"
+     '((uri . "test://nil-resource")
+       (text . nil)))))
 
 (ert-deftest test-mcp-server-lib-resources-read-not-found ()
   "Test reading a non-existent resource returns error."
   (mcp-server-lib-ert-with-server :tools nil :resources nil
-   (mcp-server-lib-test--read-resource-error
-    "test://nonexistent"
-    mcp-server-lib-jsonrpc-error-invalid-params
-    "Resource not found: test://nonexistent")))
+    (mcp-server-lib-test--read-resource-error
+     "test://nonexistent"
+     mcp-server-lib-jsonrpc-error-invalid-params
+     "Resource not found: test://nonexistent")))
 
 (ert-deftest test-mcp-server-lib-register-resource-duplicate ()
   "Test registering the same resource twice increments ref count."
   (mcp-server-lib-test--with-resources
-   (("test://resource1"
-     #'mcp-server-lib-test--return-string
-     :name "Test Resource"))
-   ;; The macro automatically verifies the resource is in the list
-   ;; Now register the same resource again to test ref counting
-   (mcp-server-lib-test--register-resource
-    "test://resource1"
-    #'mcp-server-lib-test--return-string
-    :name "Test Resource"
-    ;; Verify it's still listed only once
+      (("test://resource1"
+        #'mcp-server-lib-test--return-string
+        :name "Test Resource"))
+    ;; The macro automatically verifies the resource is in the list
+    ;; Now register the same resource again to test ref counting
+    (mcp-server-lib-test--register-resource
+        "test://resource1"
+        #'mcp-server-lib-test--return-string
+      :name "Test Resource"
+      ;; Verify it's still listed only once
+      (mcp-server-lib-test--check-single-resource
+       '((uri . "test://resource1")
+         (name . "Test Resource"))))
+    
+    ;; After inner macro completes, it unregisters once (ref count goes from 2 to 1)
+    ;; Resource should still exist because outer registration is still active
     (mcp-server-lib-test--check-single-resource
      '((uri . "test://resource1")
        (name . "Test Resource"))))
-   
-   ;; After inner macro completes, it unregisters once (ref count goes from 2 to 1)
-   ;; Resource should still exist because outer registration is still active
-   (mcp-server-lib-test--check-single-resource
-    '((uri . "test://resource1")
-      (name . "Test Resource"))))
   
   ;; After outer macro completes, it unregisters again (ref count = 0)
   ;; Resource should no longer be listed
@@ -1917,102 +1917,102 @@ from a function loaded from bytecode rather than interpreted elisp."
 (ert-deftest test-mcp-server-lib-resources-read-handler-error ()
   "Test that resource handler errors return JSON-RPC error and increment error metrics."
   (mcp-server-lib-test--with-resources
-   (("test://error-resource"
-     #'mcp-server-lib-test--generic-error-handler
-     :name "Error Resource"))
-   (mcp-server-lib-test--check-resource-read-error
-     "test://error-resource"
-     mcp-server-lib-jsonrpc-error-internal
-     "Error reading resource test://error-resource: Generic error occurred")))
+      (("test://error-resource"
+        #'mcp-server-lib-test--generic-error-handler
+        :name "Error Resource"))
+    (mcp-server-lib-test--check-resource-read-error
+      "test://error-resource"
+      mcp-server-lib-jsonrpc-error-internal
+      "Error reading resource test://error-resource: Generic error occurred")))
 
 (ert-deftest mcp-server-lib-test-resource-signal-error-invalid-params ()
   "Test signaling invalid params error from resource handler."
   (mcp-server-lib-test--with-resources
-   (("test://signal-error"
-     #'mcp-server-lib-test--resource-signal-error-invalid-params
-     :name "Signal Error Resource"))
-   (mcp-server-lib-test--check-resource-read-error
-     "test://signal-error"
-     mcp-server-lib-jsonrpc-error-invalid-params
-     "Custom invalid params message")))
+      (("test://signal-error"
+        #'mcp-server-lib-test--resource-signal-error-invalid-params
+        :name "Signal Error Resource"))
+    (mcp-server-lib-test--check-resource-read-error
+      "test://signal-error"
+      mcp-server-lib-jsonrpc-error-invalid-params
+      "Custom invalid params message")))
 
 (ert-deftest mcp-server-lib-test-resource-signal-error-internal ()
   "Test signaling internal error from resource handler."
   (mcp-server-lib-test--with-resources
-   (("test://internal-error"
-     #'mcp-server-lib-test--resource-signal-error-internal
-     :name "Internal Error Resource"))
-   (mcp-server-lib-test--check-resource-read-error
-     "test://internal-error"
-     mcp-server-lib-jsonrpc-error-internal
-     "Database connection failed")))
+      (("test://internal-error"
+        #'mcp-server-lib-test--resource-signal-error-internal
+        :name "Internal Error Resource"))
+    (mcp-server-lib-test--check-resource-read-error
+      "test://internal-error"
+      mcp-server-lib-jsonrpc-error-internal
+      "Database connection failed")))
 
 (ert-deftest mcp-server-lib-test-resource-regular-error-backward-compat ()
   "Test that regular errors still work and return internal error code."
   (mcp-server-lib-test--with-resources
-   (("test://regular-error"
-     #'mcp-server-lib-test--generic-error-handler
-     :name "Regular Error Resource"))
-   (mcp-server-lib-test--check-resource-read-error
-     "test://regular-error"
-     mcp-server-lib-jsonrpc-error-internal
-     "Error reading resource test://regular-error: Generic error occurred")))
+      (("test://regular-error"
+        #'mcp-server-lib-test--generic-error-handler
+        :name "Regular Error Resource"))
+    (mcp-server-lib-test--check-resource-read-error
+      "test://regular-error"
+      mcp-server-lib-jsonrpc-error-internal
+      "Error reading resource test://regular-error: Generic error occurred")))
 
 (ert-deftest mcp-server-lib-test-resources-read-handler-undefined ()
   "Test reading a resource whose handler function no longer exists."
   (mcp-server-lib-test--with-resources
-   (("test://undefined-handler"
-     #'mcp-server-lib-test--handler-to-be-undefined
-     :name "Undefined Handler Resource"))
-   (mcp-server-lib-test--with-undefined-function 'mcp-server-lib-test--handler-to-be-undefined
-     (mcp-server-lib-ert-with-metrics-tracking
-      (("resources/read" 1 1))
-      ;; Try to read the resource - should return an error
-      ;; Note: error-message-string may use Unicode or ASCII quotes depending on locale
-      (let* ((response (mcp-server-lib-ert--read-resource "test://undefined-handler"))
-             (error-obj (alist-get 'error response))
-             (actual-message (alist-get 'message error-obj)))
-        (should (equal mcp-server-lib-jsonrpc-error-internal (alist-get 'code error-obj)))
-        ;; Check message contains expected parts (quotes may vary by locale)
-        (should (string-match-p "^Error reading resource test://undefined-handler: Symbol.s function definition is void: mcp-server-lib-test--handler-to-be-undefined$"
-                                actual-message)))))))
+      (("test://undefined-handler"
+        #'mcp-server-lib-test--handler-to-be-undefined
+        :name "Undefined Handler Resource"))
+    (mcp-server-lib-test--with-undefined-function 'mcp-server-lib-test--handler-to-be-undefined
+      (mcp-server-lib-ert-with-metrics-tracking
+          (("resources/read" 1 1))
+        ;; Try to read the resource - should return an error
+        ;; Note: error-message-string may use Unicode or ASCII quotes depending on locale
+        (let* ((response (mcp-server-lib-ert--read-resource "test://undefined-handler"))
+               (error-obj (alist-get 'error response))
+               (actual-message (alist-get 'message error-obj)))
+          (should (equal mcp-server-lib-jsonrpc-error-internal (alist-get 'code error-obj)))
+          ;; Check message contains expected parts (quotes may vary by locale)
+          (should (string-match-p "^Error reading resource test://undefined-handler: Symbol.s function definition is void: mcp-server-lib-test--handler-to-be-undefined$"
+                                  actual-message)))))))
 
 (ert-deftest test-mcp-server-lib-resources-list-mixed ()
   "Test listing both direct resources and templates."
   (mcp-server-lib-test--with-resources
-   (("test://direct1"
-     #'mcp-server-lib-test--return-string
-     :name "Direct Resource 1")
-    ("org://{filename}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "Org Template")
-    ("test://direct2"
-     #'mcp-server-lib-test--return-string
-     :name "Direct Resource 2"
-     :mime-type "text/plain")
-    ("doc://{docname}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params-2
-     :name "Doc Template"))
-   ;; Verify we can read both types
-   (mcp-server-lib-ert-verify-resource-read
-    "test://direct1"
-    '((uri . "test://direct1")
-      (text . "test result")))
-   (mcp-server-lib-ert-verify-resource-read
-    "org://example.org"
-    '((uri . "org://example.org")
-      (text . "params: ((\"filename\" . \"example.org\"))")))))
+      (("test://direct1"
+        #'mcp-server-lib-test--return-string
+        :name "Direct Resource 1")
+       ("org://{filename}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params
+        :name "Org Template")
+       ("test://direct2"
+        #'mcp-server-lib-test--return-string
+        :name "Direct Resource 2"
+        :mime-type "text/plain")
+       ("doc://{docname}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params-2
+        :name "Doc Template"))
+    ;; Verify we can read both types
+    (mcp-server-lib-ert-verify-resource-read
+     "test://direct1"
+     '((uri . "test://direct1")
+       (text . "test result")))
+    (mcp-server-lib-ert-verify-resource-read
+     "org://example.org"
+     '((uri . "org://example.org")
+       (text . "params: ((\"filename\" . \"example.org\"))")))))
 
 ;;; Resource Template Invalid Syntax Tests
 
 (defun mcp-server-lib-test--assert-invalid-template-registration (uri)
   "Assert that registering a resource template with URI fails."
   (mcp-server-lib-ert-with-server :tools nil :resources nil
-   (should-error
-    (mcp-server-lib-register-resource
-     uri
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "Test Template"))))
+    (should-error
+     (mcp-server-lib-register-resource
+      uri
+      #'mcp-server-lib-test--resource-template-handler-dump-params
+      :name "Test Template"))))
 
 (defun mcp-server-lib-test--assert-invalid-handler-registration (handler
                                                                  handler-desc)
@@ -2042,14 +2042,14 @@ from a function loaded from bytecode rather than interpreted elisp."
     test-mcp-server-lib-resource-template-invalid-syntax-numeric-variable ()
   "Test resource template with numeric variable name is rejected."
   (mcp-server-lib-test--assert-invalid-template-registration
-    "org://{123}/content"))
+   "org://{123}/content"))
 
 (ert-deftest
     test-mcp-server-lib-resource-template-invalid-syntax-special-chars-variable
     ()
   "Test resource template with special characters in variable name is rejected."
   (mcp-server-lib-test--assert-invalid-template-registration
-    "org://{var-name}/content"))
+   "org://{var-name}/content"))
 
 (ert-deftest test-mcp-server-lib-resource-template-invalid-syntax-scheme-only ()
   "Test resource template with only scheme and no path."
@@ -2143,48 +2143,48 @@ from a function loaded from bytecode rather than interpreted elisp."
 (ert-deftest test-mcp-server-lib-resource-template-simple-variable ()
   "Test resource template with simple variable."
   (mcp-server-lib-test--with-resources
-   (("org://{filename}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "Org file content"
-     :mime-type "text/plain"))
-   ;; Test successful match
-   (mcp-server-lib-ert-verify-resource-read
-    "org://projects.org"
-    '((uri . "org://projects.org")
-      (mimeType . "text/plain")
-      (text . "params: ((\"filename\" . \"projects.org\"))")))
-   ;; Test non-matching prefix
-   (mcp-server-lib-test--read-resource-error
-    "file://projects.org"
-    mcp-server-lib-jsonrpc-error-invalid-params
-    "Resource not found: file://projects.org")))
+      (("org://{filename}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params
+        :name "Org file content"
+        :mime-type "text/plain"))
+    ;; Test successful match
+    (mcp-server-lib-ert-verify-resource-read
+     "org://projects.org"
+     '((uri . "org://projects.org")
+       (mimeType . "text/plain")
+       (text . "params: ((\"filename\" . \"projects.org\"))")))
+    ;; Test non-matching prefix
+    (mcp-server-lib-test--read-resource-error
+     "file://projects.org"
+     mcp-server-lib-jsonrpc-error-invalid-params
+     "Resource not found: file://projects.org")))
 
 (ert-deftest test-mcp-server-lib-resource-template-reserved-expansion ()
   "Test resource template with reserved expansion."
   (mcp-server-lib-test--with-resources
-   (("org://{+path}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "Org path"
-     :description "Access org files by path with slashes"))
-   ;; Test with slashes in variable
-   (mcp-server-lib-ert-verify-resource-read
-    "org://folder/subfolder/file.org"
-    '((uri . "org://folder/subfolder/file.org")
-      (text . "params: ((\"path\" . \"folder/subfolder/file.org\"))")))))
+      (("org://{+path}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params
+        :name "Org path"
+        :description "Access org files by path with slashes"))
+    ;; Test with slashes in variable
+    (mcp-server-lib-ert-verify-resource-read
+     "org://folder/subfolder/file.org"
+     '((uri . "org://folder/subfolder/file.org")
+       (text . "params: ((\"path\" . \"folder/subfolder/file.org\"))")))))
 
 (ert-deftest test-mcp-server-lib-resource-template-multiple-variables ()
   "Test resource template with multiple variables."
   (mcp-server-lib-test--with-resources
-   (("org://{filename}/headline/{+path}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "Org headline"
-     :mime-type "text/plain"))
-   (mcp-server-lib-ert-verify-resource-read
-    "org://todo.org/headline/Tasks/Urgent"
-    '((uri . "org://todo.org/headline/Tasks/Urgent")
-      (mimeType . "text/plain")
-      (text .
-            "params: ((\"filename\" . \"todo.org\") (\"path\" . \"Tasks/Urgent\"))")))))
+      (("org://{filename}/headline/{+path}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params
+        :name "Org headline"
+        :mime-type "text/plain"))
+    (mcp-server-lib-ert-verify-resource-read
+     "org://todo.org/headline/Tasks/Urgent"
+     '((uri . "org://todo.org/headline/Tasks/Urgent")
+       (mimeType . "text/plain")
+       (text .
+             "params: ((\"filename\" . \"todo.org\") (\"path\" . \"Tasks/Urgent\"))")))))
 
 (ert-deftest test-mcp-server-lib-register-resource-missing-name ()
   "Test error when registering template without name."
@@ -2200,166 +2200,166 @@ from a function loaded from bytecode rather than interpreted elisp."
   (mcp-server-lib-ert-with-server :tools nil :resources nil
     ;; Register template first
     (mcp-server-lib-test--register-resource
-     "test://{id}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "Template Resource"
-     ;; Register direct resource with URI that would match template
-     (mcp-server-lib-test--register-resource
-      "test://exact"
-      #'mcp-server-lib-test--return-string
-      :name "Direct Resource"
-      ;; Should get direct resource content
-      (mcp-server-lib-ert-verify-resource-read
-       "test://exact"
-       '((uri . "test://exact")
-         (text . "test result")))))))
+        "test://{id}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params
+      :name "Template Resource"
+      ;; Register direct resource with URI that would match template
+      (mcp-server-lib-test--register-resource
+          "test://exact"
+          #'mcp-server-lib-test--return-string
+        :name "Direct Resource"
+        ;; Should get direct resource content
+        (mcp-server-lib-ert-verify-resource-read
+         "test://exact"
+         '((uri . "test://exact")
+           (text . "test result")))))))
 
 (ert-deftest test-mcp-server-lib-resources-read-multiple-template-schemes ()
   "Test that resource templates with different schemes route correctly."
   (mcp-server-lib-ert-with-server :tools nil :resources nil
     (mcp-server-lib-test--register-resource
-     "org://{filename}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "Org Files"
-     (mcp-server-lib-test--register-resource
-      "doc://{docname}"
-      #'mcp-server-lib-test--resource-template-handler-dump-params-2
-      :name "Doc Files"
-      (mcp-server-lib-ert-verify-resource-read
-       "org://projects.org"
-       '((uri . "org://projects.org")
-         (text . "params: ((\"filename\" . \"projects.org\"))")))
-      (mcp-server-lib-ert-verify-resource-read
-       "doc://manual.pdf"
-       '((uri . "doc://manual.pdf")
-         (text . "Handler-2: params: ((\"docname\" . \"manual.pdf\"))"))))))
+        "org://{filename}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params
+      :name "Org Files"
+      (mcp-server-lib-test--register-resource
+          "doc://{docname}"
+          #'mcp-server-lib-test--resource-template-handler-dump-params-2
+        :name "Doc Files"
+        (mcp-server-lib-ert-verify-resource-read
+         "org://projects.org"
+         '((uri . "org://projects.org")
+           (text . "params: ((\"filename\" . \"projects.org\"))")))
+        (mcp-server-lib-ert-verify-resource-read
+         "doc://manual.pdf"
+         '((uri . "doc://manual.pdf")
+           (text . "Handler-2: params: ((\"docname\" . \"manual.pdf\"))"))))))
 
-(ert-deftest test-mcp-server-lib-resources-read-no-template-match ()
-  "Test error when no resource template matches the URI."
-  (mcp-server-lib-ert-with-server :tools nil :resources nil
-    (mcp-server-lib-test--register-resource
-     "test://{id}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "Test Template"
-     ;; Try to read with non-matching URI
-     (mcp-server-lib-test--read-resource-error
-      "other://123"
-      mcp-server-lib-jsonrpc-error-invalid-params
-      "Resource not found: other://123"))))
+  (ert-deftest test-mcp-server-lib-resources-read-no-template-match ()
+    "Test error when no resource template matches the URI."
+    (mcp-server-lib-ert-with-server :tools nil :resources nil
+      (mcp-server-lib-test--register-resource
+          "test://{id}"
+          #'mcp-server-lib-test--resource-template-handler-dump-params
+        :name "Test Template"
+        ;; Try to read with non-matching URI
+        (mcp-server-lib-test--read-resource-error
+         "other://123"
+         mcp-server-lib-jsonrpc-error-invalid-params
+         "Resource not found: other://123"))))
 
-(ert-deftest test-mcp-server-lib-resource-template-empty-parameter-value ()
-  "Test resource template matching with empty parameter value."
-  (mcp-server-lib-test--with-resources
-   (("org://{filename}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "Org file template"))
-   ;; Test URI with empty filename parameter
-   (mcp-server-lib-ert-verify-resource-read
-    "org://"
-    '((uri . "org://")
-      (text . "params: ((\"filename\" . \"\"))"))))))
+  (ert-deftest test-mcp-server-lib-resource-template-empty-parameter-value ()
+    "Test resource template matching with empty parameter value."
+    (mcp-server-lib-test--with-resources
+        (("org://{filename}"
+          #'mcp-server-lib-test--resource-template-handler-dump-params
+          :name "Org file template"))
+      ;; Test URI with empty filename parameter
+      (mcp-server-lib-ert-verify-resource-read
+       "org://"
+       '((uri . "org://")
+         (text . "params: ((\"filename\" . \"\"))"))))))
 
 (ert-deftest test-mcp-server-lib-unregister-resource-multiple ()
   "Test unregistering one resource when multiple are registered."
   (mcp-server-lib-test--with-resources
-   (("org://{filename}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "Org Files")
-    ("doc://{docname}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params-2
-     :name "Doc Files")
-    ("test://{id}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "Test Files"))
-   ;; Verify all three are listed
-   (let ((resources (mcp-server-lib-ert-get-resource-templates-list)))
-     (should (= 3 (length resources))))
-   ;; Unregister the middle one
-   (mcp-server-lib-unregister-resource "doc://{docname}")
-   ;; Verify only two remain
-   (let ((resources (mcp-server-lib-ert-get-resource-templates-list)))
-     (should (= 2 (length resources)))
-     ;; Check the remaining ones
-     (should (mcp-server-lib-test--find-resource-by-uri-template
-              "org://{filename}" resources))
-     (should (mcp-server-lib-test--find-resource-by-uri-template
-              "test://{id}" resources))
-     ;; Verify the unregistered one is gone
-     (should-not (mcp-server-lib-test--find-resource-by-uri-template
-                  "doc://{docname}" resources)))
-   ;; Verify the remaining templates still work
-   (mcp-server-lib-ert-verify-resource-read
-    "org://test.org"
-    '((uri . "org://test.org")
-      (text . "params: ((\"filename\" . \"test.org\"))")))
-   (mcp-server-lib-ert-verify-resource-read
-    "test://123"
-    '((uri . "test://123")
-      (text . "params: ((\"id\" . \"123\"))")))
-   ;; Verify the unregistered template no longer matches
-   (mcp-server-lib-test--read-resource-error
-    "doc://manual.pdf"
-    mcp-server-lib-jsonrpc-error-invalid-params
-    "Resource not found: doc://manual.pdf")))
+      (("org://{filename}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params
+        :name "Org Files")
+       ("doc://{docname}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params-2
+        :name "Doc Files")
+       ("test://{id}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params
+        :name "Test Files"))
+    ;; Verify all three are listed
+    (let ((resources (mcp-server-lib-ert-get-resource-templates-list)))
+      (should (= 3 (length resources))))
+    ;; Unregister the middle one
+    (mcp-server-lib-unregister-resource "doc://{docname}")
+    ;; Verify only two remain
+    (let ((resources (mcp-server-lib-ert-get-resource-templates-list)))
+      (should (= 2 (length resources)))
+      ;; Check the remaining ones
+      (should (mcp-server-lib-test--find-resource-by-uri-template
+               "org://{filename}" resources))
+      (should (mcp-server-lib-test--find-resource-by-uri-template
+               "test://{id}" resources))
+      ;; Verify the unregistered one is gone
+      (should-not (mcp-server-lib-test--find-resource-by-uri-template
+                   "doc://{docname}" resources)))
+    ;; Verify the remaining templates still work
+    (mcp-server-lib-ert-verify-resource-read
+     "org://test.org"
+     '((uri . "org://test.org")
+       (text . "params: ((\"filename\" . \"test.org\"))")))
+    (mcp-server-lib-ert-verify-resource-read
+     "test://123"
+     '((uri . "test://123")
+       (text . "params: ((\"id\" . \"123\"))")))
+    ;; Verify the unregistered template no longer matches
+    (mcp-server-lib-test--read-resource-error
+     "doc://manual.pdf"
+     mcp-server-lib-jsonrpc-error-invalid-params
+     "Resource not found: doc://manual.pdf")))
 
 (ert-deftest test-mcp-server-lib-resources-read-template-handler-error ()
   "Test template handler errors bumping metrics and returning JSON-RPC errors."
   (mcp-server-lib-ert-with-server :tools nil :resources nil
     (mcp-server-lib-test--register-resource
-     "error://{id}"
-     #'mcp-server-lib-test--template-handler-error
-     :name "Error Template"
-     (mcp-server-lib-test--check-resource-read-error
-       "error://test"
-       mcp-server-lib-jsonrpc-error-internal
-       "Error reading resource error://test: Generic error occurred"))))
+        "error://{id}"
+        #'mcp-server-lib-test--template-handler-error
+      :name "Error Template"
+      (mcp-server-lib-test--check-resource-read-error
+        "error://test"
+        mcp-server-lib-jsonrpc-error-internal
+        "Error reading resource error://test: Generic error occurred"))))
 
 (ert-deftest test-mcp-server-lib-resources-read-template-handler-nil ()
   "Test nil-returning template handler produces valid response with empty text."
   (mcp-server-lib-ert-with-server :tools nil :resources nil
     (mcp-server-lib-test--register-resource
-     "nil://{id}"
-     #'mcp-server-lib-test--resource-template-handler-nil
-     :name "Nil Template"
-     ;; Read the resource
-     (mcp-server-lib-ert-verify-resource-read
-      "nil://test"
-      '((uri . "nil://test")
-        (text . nil))))))
+        "nil://{id}"
+        #'mcp-server-lib-test--resource-template-handler-nil
+      :name "Nil Template"
+      ;; Read the resource
+      (mcp-server-lib-ert-verify-resource-read
+       "nil://test"
+       '((uri . "nil://test")
+         (text . nil))))))
 
 (ert-deftest test-mcp-server-lib-resources-read-template-handler-undefined ()
   "Test reading a resource template whose handler function no longer exists."
   (mcp-server-lib-ert-with-server :tools nil :resources nil
     (mcp-server-lib-test--register-resource
-     "undefined://{id}"
-     #'mcp-server-lib-test--handler-to-be-undefined
-     :name "Undefined Handler Template"
-     (mcp-server-lib-test--with-undefined-function
-      'mcp-server-lib-test--handler-to-be-undefined
-       (mcp-server-lib-ert-with-metrics-tracking
-        (("resources/read" 1 1))
-        ;; Try to read the resource - should return an error
-        (mcp-server-lib-test--read-resource-error
-         "undefined://test-123"
-         mcp-server-lib-jsonrpc-error-internal
-         "Error reading resource undefined://test-123: Symbol’s function definition is void: mcp-server-lib-test--handler-to-be-undefined"))))))
+        "undefined://{id}"
+        #'mcp-server-lib-test--handler-to-be-undefined
+      :name "Undefined Handler Template"
+      (mcp-server-lib-test--with-undefined-function
+          'mcp-server-lib-test--handler-to-be-undefined
+        (mcp-server-lib-ert-with-metrics-tracking
+            (("resources/read" 1 1))
+          ;; Try to read the resource - should return an error
+          (mcp-server-lib-test--read-resource-error
+           "undefined://test-123"
+           mcp-server-lib-jsonrpc-error-internal
+           "Error reading resource undefined://test-123: Symbol’s function definition is void: mcp-server-lib-test--handler-to-be-undefined"))))))
 
 (ert-deftest test-mcp-server-lib-resource-template-scheme-case-insensitive ()
   "Test that URI schemes should be case-insensitive per RFC 3986."
   (mcp-server-lib-test--with-resources
-   (("test://{id}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "Test Template"))
-   ;; Test uppercase scheme should match
-   (mcp-server-lib-ert-verify-resource-read
-    "TEST://123"
-    '((uri . "TEST://123")
-      (text . "params: ((\"id\" . \"123\"))")))
-   ;; Test mixed case scheme should match
-   (mcp-server-lib-ert-verify-resource-read
-    "Test://456"
-    '((uri . "Test://456")
-      (text . "params: ((\"id\" . \"456\"))")))))
+      (("test://{id}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params
+        :name "Test Template"))
+    ;; Test uppercase scheme should match
+    (mcp-server-lib-ert-verify-resource-read
+     "TEST://123"
+     '((uri . "TEST://123")
+       (text . "params: ((\"id\" . \"123\"))")))
+    ;; Test mixed case scheme should match
+    (mcp-server-lib-ert-verify-resource-read
+     "Test://456"
+     '((uri . "Test://456")
+       (text . "params: ((\"id\" . \"456\"))")))))
 
 (ert-deftest test-mcp-server-lib-resource-template-variable-names-case-sensitive
     ()
@@ -2367,22 +2367,22 @@ from a function loaded from bytecode rather than interpreted elisp."
   (mcp-server-lib-ert-with-server :tools nil :resources nil
     ;; Register template with lowercase variable
     (mcp-server-lib-test--register-resource
-     "test://{username}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "Lowercase Template"
-     ;; Register template with uppercase variable (different template)
-     (mcp-server-lib-test--register-resource
-      "test://{USERNAME}"
-      #'mcp-server-lib-test--resource-template-handler-dump-params-2
-      :name "Uppercase Template"
-      ;; Both templates should be registered
-      (let ((resources (mcp-server-lib-ert-get-resource-templates-list)))
-        (should (= 2 (length resources))))
-      ;; Test that they extract different variables
-      (mcp-server-lib-ert-verify-resource-read
-       "test://john"
-       '((uri . "test://john")
-         (text . "params: ((\"username\" . \"john\"))")))))))
+        "test://{username}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params
+      :name "Lowercase Template"
+      ;; Register template with uppercase variable (different template)
+      (mcp-server-lib-test--register-resource
+          "test://{USERNAME}"
+          #'mcp-server-lib-test--resource-template-handler-dump-params-2
+        :name "Uppercase Template"
+        ;; Both templates should be registered
+        (let ((resources (mcp-server-lib-ert-get-resource-templates-list)))
+          (should (= 2 (length resources))))
+        ;; Test that they extract different variables
+        (mcp-server-lib-ert-verify-resource-read
+         "test://john"
+         '((uri . "test://john")
+           (text . "params: ((\"username\" . \"john\"))")))))))
 
 (ert-deftest test-mcp-server-lib-resource-template-path-literals-case-sensitive
     ()
@@ -2390,125 +2390,125 @@ from a function loaded from bytecode rather than interpreted elisp."
   (mcp-server-lib-ert-with-server :tools nil :resources nil
     ;; Register template with lowercase path
     (mcp-server-lib-test--register-resource
-     "test://path/{id}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "Lowercase Path Template"
-     ;; Register template with uppercase path
-     (mcp-server-lib-test--register-resource
-      "test://PATH/{id}"
-      (lambda (params)
-        (format "UPPERCASE PATH: %s" (alist-get "id" params nil nil #'string=)))
-      :name "Uppercase Path Template"
-      ;; Both templates should be registered
-      (let ((resources (mcp-server-lib-ert-get-resource-templates-list)))
-        (should (= 2 (length resources))))
-      ;; Test lowercase path matches only lowercase template
-      (mcp-server-lib-ert-verify-resource-read
-       "test://path/123"
-       '((uri . "test://path/123")
-         (text . "params: ((\"id\" . \"123\"))")))
-      ;; Test uppercase path matches only uppercase template
-      (mcp-server-lib-ert-verify-resource-read
-       "test://PATH/456"
-       '((uri . "test://PATH/456")
-         (text . "UPPERCASE PATH: 456")))
-      ;; Test mixed case path doesn't match either
-      (mcp-server-lib-test--read-resource-error
-       "test://Path/789"
-       mcp-server-lib-jsonrpc-error-invalid-params
-       "Resource not found: test://Path/789")))))
+        "test://path/{id}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params
+      :name "Lowercase Path Template"
+      ;; Register template with uppercase path
+      (mcp-server-lib-test--register-resource
+          "test://PATH/{id}"
+          (lambda (params)
+            (format "UPPERCASE PATH: %s" (alist-get "id" params nil nil #'string=)))
+        :name "Uppercase Path Template"
+        ;; Both templates should be registered
+        (let ((resources (mcp-server-lib-ert-get-resource-templates-list)))
+          (should (= 2 (length resources))))
+        ;; Test lowercase path matches only lowercase template
+        (mcp-server-lib-ert-verify-resource-read
+         "test://path/123"
+         '((uri . "test://path/123")
+           (text . "params: ((\"id\" . \"123\"))")))
+        ;; Test uppercase path matches only uppercase template
+        (mcp-server-lib-ert-verify-resource-read
+         "test://PATH/456"
+         '((uri . "test://PATH/456")
+           (text . "UPPERCASE PATH: 456")))
+        ;; Test mixed case path doesn't match either
+        (mcp-server-lib-test--read-resource-error
+         "test://Path/789"
+         mcp-server-lib-jsonrpc-error-invalid-params
+         "Resource not found: test://Path/789")))))
 
 (ert-deftest test-mcp-server-lib-resource-template-unicode-in-variables ()
   "Test Unicode characters in variable values with proper percent-encoding."
   (mcp-server-lib-test--with-resources
-   (("org://{filename}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "Org file template"))
-   ;; Test with direct Unicode character in URI
-   (mcp-server-lib-ert-verify-resource-read
-    "org://café.org"
-    '((uri . "org://café.org")
-      (text . "params: ((\"filename\" . \"café.org\"))")))
-   ;; Test with percent-encoded Unicode in URI
-   (mcp-server-lib-ert-verify-resource-read
-    "org://caf%C3%A9.org"
-    '((uri . "org://caf%C3%A9.org")
-      (text . "params: ((\"filename\" . \"caf%C3%A9.org\"))")))
-   ;; Test with multiple Unicode characters
-   (mcp-server-lib-ert-verify-resource-read
-    "org://文档.org"
-    '((uri . "org://文档.org")
-      (text . "params: ((\"filename\" . \"文档.org\"))")))))
+      (("org://{filename}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params
+        :name "Org file template"))
+    ;; Test with direct Unicode character in URI
+    (mcp-server-lib-ert-verify-resource-read
+     "org://café.org"
+     '((uri . "org://café.org")
+       (text . "params: ((\"filename\" . \"café.org\"))")))
+    ;; Test with percent-encoded Unicode in URI
+    (mcp-server-lib-ert-verify-resource-read
+     "org://caf%C3%A9.org"
+     '((uri . "org://caf%C3%A9.org")
+       (text . "params: ((\"filename\" . \"caf%C3%A9.org\"))")))
+    ;; Test with multiple Unicode characters
+    (mcp-server-lib-ert-verify-resource-read
+     "org://文档.org"
+     '((uri . "org://文档.org")
+       (text . "params: ((\"filename\" . \"文档.org\"))")))))
 
 (ert-deftest test-mcp-server-lib-resource-template-percent-encoded-extraction ()
   "Test that extracted parameters remain percent-encoded."
   (mcp-server-lib-ert-with-server :tools nil :resources nil
     (mcp-server-lib-test--register-resource
-     "file://{path}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "File template"
-     ;; Test spaces remain encoded
-     (mcp-server-lib-ert-verify-resource-read
-      "file://my%20document.txt"
-      '((uri . "file://my%20document.txt")
-        (text . "params: ((\"path\" . \"my%20document.txt\"))")))
-     ;; Test Unicode remains encoded
-     (mcp-server-lib-ert-verify-resource-read
-      "file://caf%C3%A9.txt"
-      '((uri . "file://caf%C3%A9.txt")
-        (text . "params: ((\"path\" . \"caf%C3%A9.txt\"))")))
-     ;; Test special characters remain encoded
-     (mcp-server-lib-ert-verify-resource-read
-      "file://file%2Bwith%2Bplus.txt"
-      '((uri . "file://file%2Bwith%2Bplus.txt")
-        (text . "params: ((\"path\" . \"file%2Bwith%2Bplus.txt\"))"))))))
+        "file://{path}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params
+      :name "File template"
+      ;; Test spaces remain encoded
+      (mcp-server-lib-ert-verify-resource-read
+       "file://my%20document.txt"
+       '((uri . "file://my%20document.txt")
+         (text . "params: ((\"path\" . \"my%20document.txt\"))")))
+      ;; Test Unicode remains encoded
+      (mcp-server-lib-ert-verify-resource-read
+       "file://caf%C3%A9.txt"
+       '((uri . "file://caf%C3%A9.txt")
+         (text . "params: ((\"path\" . \"caf%C3%A9.txt\"))")))
+      ;; Test special characters remain encoded
+      (mcp-server-lib-ert-verify-resource-read
+       "file://file%2Bwith%2Bplus.txt"
+       '((uri . "file://file%2Bwith%2Bplus.txt")
+         (text . "params: ((\"path\" . \"file%2Bwith%2Bplus.txt\"))"))))))
 
 (ert-deftest
     test-mcp-server-lib-resource-template-reserved-expansion-passthrough ()
   "Test that {+var} allows reserved chars without encoding."
   (mcp-server-lib-ert-with-server :tools nil :resources nil
     (mcp-server-lib-test--register-resource
-     "file:///{+path}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "File path template"
-     ;; Test mixed reserved characters
-     (mcp-server-lib-ert-verify-resource-read
-      "file:///path/with?query=value#section"
-      '((uri . "file:///path/with?query=value#section")
-        (text . "params: ((\"path\" . \"path/with?query=value#section\"))"))))))
+        "file:///{+path}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params
+      :name "File path template"
+      ;; Test mixed reserved characters
+      (mcp-server-lib-ert-verify-resource-read
+       "file:///path/with?query=value#section"
+       '((uri . "file:///path/with?query=value#section")
+         (text . "params: ((\"path\" . \"path/with?query=value#section\"))"))))))
 
 (ert-deftest test-mcp-server-lib-resource-template-first-match-precedence ()
   "Test which template wins when multiple could match."
   (mcp-server-lib-ert-with-server :tools nil :resources nil
     ;; Register general template first
     (mcp-server-lib-test--register-resource
-     "test://{id}"
-     #'mcp-server-lib-test--resource-template-handler-dump-params
-     :name "General template"
-     ;; Register more specific template second
-     (mcp-server-lib-test--register-resource
-      "test://item/{id}"
-      #'mcp-server-lib-test--resource-template-handler-dump-params-2
-      :name "Specific template"
-      ;; First registered template should win
-      (mcp-server-lib-ert-verify-resource-read
-       "test://item/123"
-       '((uri . "test://item/123")
-         (text . "params: ((\"id\" . \"item/123\"))")))
-      ;; Verify both templates are registered
-      (let ((resources (mcp-server-lib-ert-get-resource-templates-list)))
-        (should (= 2 (length resources))))))))
+        "test://{id}"
+        #'mcp-server-lib-test--resource-template-handler-dump-params
+      :name "General template"
+      ;; Register more specific template second
+      (mcp-server-lib-test--register-resource
+          "test://item/{id}"
+          #'mcp-server-lib-test--resource-template-handler-dump-params-2
+        :name "Specific template"
+        ;; First registered template should win
+        (mcp-server-lib-ert-verify-resource-read
+         "test://item/123"
+         '((uri . "test://item/123")
+           (text . "params: ((\"id\" . \"item/123\"))")))
+        ;; Verify both templates are registered
+        (let ((resources (mcp-server-lib-ert-get-resource-templates-list)))
+          (should (= 2 (length resources))))))))
 
 (ert-deftest test-mcp-server-lib-resources-read-malformed-params ()
   "Test resources/read with invalid params structure (string instead of object)."
   (mcp-server-lib-test--with-resources
-   (("test://resource" #'mcp-server-lib-test--return-string
-     :name "Test Resource"))
-   ;; Test with string params instead of object
-   (mcp-server-lib-test--check-resource-read-request-error
-    "invalid string params"
-    mcp-server-lib-jsonrpc-error-internal
-    "Internal error: Wrong type argument: listp, \"invalid string params\"")))
+      (("test://resource" #'mcp-server-lib-test--return-string
+        :name "Test Resource"))
+    ;; Test with string params instead of object
+    (mcp-server-lib-test--check-resource-read-request-error
+     "invalid string params"
+     mcp-server-lib-jsonrpc-error-internal
+     "Internal error: Wrong type argument: listp, \"invalid string params\"")))
 
 (ert-deftest test-mcp-server-lib-resources-read-missing-uri ()
   "Test resources/read without uri parameter."
@@ -2540,15 +2540,15 @@ from a function loaded from bytecode rather than interpreted elisp."
 (ert-deftest test-mcp-server-lib-resource-template-handler-wrong-signature ()
   "Test template handler that doesn't accept params argument."
   (mcp-server-lib-test--with-resources
-   (("test://{id}"
-     #'mcp-server-lib-test--return-string
-     :name "Wrong Signature Handler"))
-   (mcp-server-lib-test--read-resource-error
-    "test://123"
-    mcp-server-lib-jsonrpc-error-internal
-    (if (version< emacs-version "30.1")
-        "Error reading resource test://123: Wrong number of arguments: ((t) nil \"Generic handler to return a test string.\" \"test result\"), 1"
-      "Error reading resource test://123: Wrong number of arguments: #[nil (\"test result\") (t) nil \"Generic handler to return a test string.\"], 1"))))
+      (("test://{id}"
+        #'mcp-server-lib-test--return-string
+        :name "Wrong Signature Handler"))
+    (mcp-server-lib-test--read-resource-error
+     "test://123"
+     mcp-server-lib-jsonrpc-error-internal
+     (if (version< emacs-version "30.1")
+         "Error reading resource test://123: Wrong number of arguments: ((t) nil \"Generic handler to return a test string.\" \"test result\"), 1"
+       "Error reading resource test://123: Wrong number of arguments: #[nil (\"test result\") (t) nil \"Generic handler to return a test string.\"], 1"))))
 
 (provide 'mcp-server-lib-test)
 

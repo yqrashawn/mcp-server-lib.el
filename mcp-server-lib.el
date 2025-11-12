@@ -199,7 +199,7 @@ Keys are URI templates, values are plists with template metadata and handlers.")
 (defun mcp-server-lib--jsonrpc-response (id result)
   "Create a JSON-RPC response with ID and RESULT."
   (decode-coding-string
-   (mcp-server-lib--json-encode `((jsonrpc . "2.0") (id . ,id) (result . ,result)))
+   (mcp-server-lib--json-encode (list :jsonrpc "2.0" :id id :result result))
    'utf-8 t))
 
 
@@ -319,32 +319,32 @@ Returns t if item was found, nil otherwise."
   "Create a JSON-RPC error response with ID, error CODE and MESSAGE."
   (decode-coding-string
    (mcp-server-lib--json-encode
-    `((jsonrpc . "2.0")
-      (id . ,id)
-      (error . ((code . ,code) (message . ,message)))))
+    (list :jsonrpc "2.0"
+          :id id
+          :error (list :code code :message message)))
    'utf-8 t))
 
-(defun mcp-server-lib--append-optional-fields (alist &rest pairs)
-  "Append optional field PAIRS to ALIST.
+(defun mcp-server-lib--append-optional-fields (plist &rest pairs)
+  "Append optional field PAIRS to PLIST.
 
-PAIRS should be alternating keys and values.
+PAIRS should be alternating keyword keys and values.
 Only adds a key-value pair if the value is non-nil.
 
 Example:
   (mcp-server-lib--append-optional-fields
-   \\='((uri . \"test://resource\") (name . \"Test\"))
-   \\='description description-var
-   \\='mimeType mime-type-var)
+   \\='(:uri \"test://resource\" :name \"Test\")
+   :description description-var
+   :mimeType mime-type-var)
 
 This adds description only if description-var is non-nil,
 and mimeType only if mime-type-var is non-nil."
-  (let ((additions nil))
+  (let ((result (copy-sequence plist)))
     (while pairs
       (let ((key (pop pairs))
             (value (pop pairs)))
         (when value
-          (push (cons key value) additions))))
-    (append alist additions)))
+          (setq result (plist-put result key value)))))
+    result))
 
 (defun mcp-server-lib--respond-with-result
     (request-context result-data)
@@ -405,7 +405,7 @@ Returns a JSON-RPC error response string for internal errors."
 (defun mcp-server-lib--validate-and-dispatch-request (request)
   "Process a JSON-RPC REQUEST object and validate JSON-RPC 2.0 compliance.
 
-REQUEST is a parsed JSON object (alist) containing the JSON-RPC request fields.
+REQUEST is a parsed JSON object (plist) containing the JSON-RPC request fields.
 
 The function performs JSON-RPC 2.0 validation, checking:
 - Protocol version (must be \"2.0\")
@@ -414,10 +414,10 @@ The function performs JSON-RPC 2.0 validation, checking:
 
 If validation succeeds, dispatches the request to the appropriate handler.
 Returns a JSON-RPC formatted response string, or nil for notifications."
-  (let* ((jsonrpc (alist-get 'jsonrpc request))
-         (id (alist-get 'id request))
-         (method (alist-get 'method request))
-         (params (alist-get 'params request))
+  (let* ((jsonrpc (plist-get request :jsonrpc))
+         (id (plist-get request :id))
+         (method (plist-get request :method))
+         (params (plist-get request :params))
          (is-notification
           (and method (string-prefix-p "notifications/" method))))
     ;; Check for JSON-RPC 2.0 compliance first
@@ -457,12 +457,12 @@ Returns a JSON-RPC formatted response string, or nil for notifications."
 (defun mcp-server-lib--match-uri-template (uri parsed-template)
   "Match URI against PARSED-TEMPLATE.
 Returns:
-- alist of captured parameters if URI matches and has variables
+- plist of captured parameters if URI matches and has variables
 - \\='match-no-params if URI matches but template has no variables
 - nil if URI doesn't match template"
   (let ((segments (plist-get parsed-template :segments))
         (pos 0)
-        (params '())
+        (params nil)  ; Will build as plist (:key1 val1 :key2 val2)
         (uri-len (length uri)))
     (catch 'no-match
       ;; Handle first segment with scheme - it's always literal
@@ -527,17 +527,21 @@ Returns:
                                        pos)))
                     (unless end-pos
                       (throw 'no-match nil))
-                    (push (cons var-name (substring uri pos end-pos))
-                          params)
+                    ;; Add to plist: convert var-name string to keyword
+                    (setq params (plist-put params 
+                                            (intern (concat ":" var-name))
+                                            (substring uri pos end-pos)))
                     (setq pos end-pos))
                 ;; Variable at end - consume rest
-                (push (cons var-name (substring uri pos)) params)
+                (setq params (plist-put params
+                                        (intern (concat ":" var-name))
+                                        (substring uri pos)))
                 (setq pos uri-len)))))))
       ;; Check we consumed entire URI
       (when (= pos uri-len)
-        ;; Return params or 'match-no-params to distinguish from no match
+        ;; Return params plist or 'match-no-params to distinguish from no match
         (if params
-            (nreverse params)
+            params  ; Already a proper plist, no need to reverse
           'match-no-params)))))
 
 (defun mcp-server-lib--find-matching-template (uri)
@@ -549,7 +553,7 @@ Returns cons of (template . params) or nil if no match found."
        (let* ((parsed (plist-get template-data :parsed))
               (match-result
                (mcp-server-lib--match-uri-template uri parsed)))
-         ;; match-result is nil for no match, 'match-no-params or alist
+         ;; match-result is nil for no match, 'match-no-params or plist
          (when match-result
            (throw 'found
                   (cons
@@ -577,10 +581,10 @@ METHOD-METRICS is used to track errors."
                 (funcall handler)))
              (content-entry
               (mcp-server-lib--append-optional-fields
-               `((uri . ,uri) (text . ,content))
-               'mimeType mime-type)))
+               `(:uri ,uri :text ,content)
+               :mimeType mime-type)))
         (mcp-server-lib--jsonrpc-response
-         id `((contents . ,(vector content-entry)))))
+         id `(:contents ,(vector content-entry))))
     ;; Handle resource-specific errors with custom error codes
     (mcp-server-lib-resource-error
      (cl-incf (mcp-server-lib-metrics-errors method-metrics))
@@ -600,7 +604,7 @@ METHOD-METRICS is used to track errors."
   "Handle resources/read request with ID and PARAMS.
 METHOD-METRICS is used to track errors for this method."
   (let*
-      ((uri (alist-get 'uri params))
+      ((uri (plist-get params :uri))
        (resource (gethash uri mcp-server-lib--resources))
        ;; Try to find matching resource template if no direct resource
        (template-match
@@ -876,9 +880,9 @@ Returns a list of all registered resource templates."
 (defun mcp-server-lib--handle-tools-call (id params method-metrics)
   "Handle tools/call request with ID and PARAMS.
 METHOD-METRICS is used to track errors for this method."
-  (let* ((tool-name (alist-get 'name params))
+  (let* ((tool-name (plist-get params :name))
          (tool (gethash tool-name mcp-server-lib--tools))
-         (tool-args (alist-get 'arguments params))
+         (tool-args (plist-get params :arguments))
          (tool-args-vals (mapcar 'cdr tool-args)))
     (if tool
         (condition-case err

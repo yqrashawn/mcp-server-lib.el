@@ -38,32 +38,40 @@
 If EXPECTED-ERROR is non-nil, expects isError to be true.
 Returns the text content string on success.
 Signals test failure if response structure is invalid."
-  (let ((result (alist-get 'result response)))
+  (let ((result (plist-get response :result)))
     ;; Response must have a result field
     (should result)
     ;; Check result has exactly the expected fields
-    (let ((result-keys (mapcar #'car result)))
+    (let ((result-keys (let ((keys nil) (plist result))
+                         (while plist
+                           (push (car plist) keys)
+                           (setq plist (cddr plist)))
+                         (nreverse keys))))
       (should (= 2 (length result-keys)))
-      (should (member 'content result-keys))
-      (should (member 'isError result-keys)))
+      (should (memq :content result-keys))
+      (should (memq :isError result-keys)))
     ;; Check content field structure
-    (let ((content (alist-get 'content result)))
+    (let ((content (plist-get result :content)))
       (should (arrayp content))
       (should (= 1 (length content)))
       ;; Check content item structure
       (let* ((text-item (aref content 0))
-             (item-keys (mapcar #'car text-item)))
+             (item-keys (let ((keys nil) (plist text-item))
+                          (while plist
+                            (push (car plist) keys)
+                            (setq plist (cddr plist)))
+                          (nreverse keys))))
         (should (= 2 (length item-keys)))
-        (should (member 'type item-keys))
-        (should (member 'text item-keys))
+        (should (memq :type item-keys))
+        (should (memq :text item-keys))
         ;; Check content item values
-        (should (string= "text" (alist-get 'type text-item)))
-        (let ((text (alist-get 'text text-item)))
+        (should (string= "text" (plist-get text-item :type)))
+        (let ((text (plist-get text-item :text)))
           (should (stringp text))
           ;; Check isError field
           (should
            (eq
-            (alist-get 'isError result)
+            (plist-get result :isError)
             (if expected-error
                 t
               :json-false)))
@@ -137,17 +145,22 @@ EXPECTED-PAYLOAD-FIELD should be either \\='result or \\='error.
 If EXPECTED-ID is provided, validates that the response ID matches it.
 Returns the value of the expected payload field."
   (should (memq expected-payload-field '(result error)))
-  (let ((response-keys (mapcar #'car response))
-        (payload (alist-get expected-payload-field response)))
+  (let ((response-keys (let ((keys nil) (plist response))
+                         (while plist
+                           (push (car plist) keys)
+                           (setq plist (cddr plist)))
+                         (nreverse keys)))
+        (payload-key (intern (concat ":" (symbol-name expected-payload-field))))
+        (payload (plist-get response (intern (concat ":" (symbol-name expected-payload-field))))))
     (should (= 3 (length response-keys)))
-    (should (member 'jsonrpc response-keys))
-    (should (member 'id response-keys))
+    (should (memq :jsonrpc response-keys))
+    (should (memq :id response-keys))
     (should payload)
-    (should (string= "2.0" (alist-get 'jsonrpc response)))
+    (should (string= "2.0" (plist-get response :jsonrpc)))
     ;; Verify id field exists (value can be nil for error responses)
-    (should (assq 'id response))
+    (should (plist-member response :id))
     (when expected-id
-      (let ((id (alist-get 'id response)))
+      (let ((id (plist-get response :id)))
         (should (equal expected-id id))))
     payload))
 
@@ -164,8 +177,8 @@ Arguments:
 Example:
   (mcp-server-lib-ert-verify-req-success \"tools/list\"
     (let ((response (mcp-server-lib-process-jsonrpc-parsed request)))
-      (should-not (alist-get \\='error response))
-      (alist-get \\='result response)))"
+      (should-not (plist-get response :error))
+      (plist-get response :result)))"
   (declare (indent defun) (debug t))
   `(mcp-server-lib-ert-with-metrics-tracking ((,method 1 0))
      ,@body))
@@ -218,30 +231,28 @@ This function validates:
 - Protocol version matches the expected version
 - Server info contains the correct server name
 - Capabilities match the expected state for tools and resources"
-  (let ((protocol-version (alist-get 'protocolVersion init-result))
-        (capabilities (alist-get 'capabilities init-result))
-        (server-info (alist-get 'serverInfo init-result)))
+  (let ((protocol-version (plist-get init-result :protocolVersion))
+        (capabilities (plist-get init-result :capabilities))
+        (server-info (plist-get init-result :serverInfo)))
     (should
      (string= mcp-server-lib-protocol-version protocol-version))
     (should
-     (string= mcp-server-lib-name (alist-get 'name server-info)))
+     (string= mcp-server-lib-name (plist-get server-info :name)))
     ;; Verify capabilities match expectations
     (when tools
-      (should (assoc 'tools capabilities))
+      (should (plist-member capabilities :tools))
       ;; Empty objects {} in JSON are parsed as nil in Elisp
-      (should-not (alist-get 'tools capabilities)))
+      (should-not (plist-get capabilities :tools)))
     (when resources
-      (should (assoc 'resources capabilities))
-      (should-not (alist-get 'resources capabilities)))
+      (should (plist-member capabilities :resources))
+      (should-not (plist-get capabilities :resources)))
     ;; Verify exact count
-    (should
-     (= (+ (if tools
-               1
-             0)
-           (if resources
-               1
-             0))
-        (length capabilities)))))
+    (let ((cap-count 0))
+      (when (plist-member capabilities :tools)
+        (setq cap-count (1+ cap-count)))
+      (when (plist-member capabilities :resources)
+        (setq cap-count (1+ cap-count)))
+      (should (= (+ (if tools 1 0) (if resources 1 0)) cap-count)))))
 
 (defun mcp-server-lib-ert-get-resource-list ()
   "Get the successful response to a \\='resources/list request.
@@ -254,13 +265,13 @@ Example:
   (let ((resources (mcp-server-lib-ert-get-resource-list)))
     (should (= 2 (length resources)))
     (should (string= \"test://resource1\"
-                     (alist-get \\='uri (aref resources 0)))))"
+                     (plist-get (aref resources 0) :uri))))"
   (let ((result
-         (alist-get
-          'resources
+         (plist-get
           (mcp-server-lib-ert-get-success-result
            "resources/list"
-           (mcp-server-lib-create-resources-list-request)))))
+           (mcp-server-lib-create-resources-list-request))
+          :resources)))
     (should (arrayp result))
     result))
 
@@ -275,21 +286,21 @@ Example:
   (let ((templates (mcp-server-lib-ert-get-resource-templates-list)))
     (should (= 1 (length templates)))
     (should (string= \"org://{filename}\"
-                     (alist-get \\='uriTemplate (aref templates 0)))))"
+                     (plist-get (aref templates 0) :uriTemplate))))"
   (let
       ((result
-        (alist-get
-         'resourceTemplates
+        (plist-get
          (mcp-server-lib-ert-get-success-result
           "resources/templates/list"
-          (mcp-server-lib-create-resources-templates-list-request)))))
+          (mcp-server-lib-create-resources-templates-list-request))
+         :resourceTemplates)))
     (should (arrayp result))
     result))
 
 (cl-defmacro
- mcp-server-lib-ert-with-server
- (&rest body &key tools resources &allow-other-keys)
- "Run BODY with MCP server active and initialized.
+    mcp-server-lib-ert-with-server
+    (&rest body &key tools resources &allow-other-keys)
+  "Run BODY with MCP server active and initialized.
 Starts the server, sends initialize request, then runs BODY.
 TOOLS and RESOURCES are booleans indicating expected capabilities.
 
@@ -309,36 +320,36 @@ Example:
   ;; Test with no capabilities expected
   (mcp-server-lib-ert-with-server :tools nil :resources nil
     (let ((response (mcp-server-lib-process-jsonrpc-parsed request)))
-      (should (alist-get \\='result response))))
+      (should (plist-get response :result))))
 
   ;; Test with tools capability expected
   (mcp-server-lib-ert-with-server :tools t :resources nil
     (let ((tools (mcp-server-lib-ert-get-resource-list)))
       (should (arrayp tools))))"
- (declare (indent defun) (debug t))
- `(unwind-protect
-      (progn
-        (mcp-server-lib-start)
-        (mcp-server-lib-ert-assert-initialize-result
-         (mcp-server-lib-ert--get-initialize-result)
-         ,tools
-         ,resources)
-        ;; Send initialized notification - should return nil
-        (should-not
-         (mcp-server-lib-process-jsonrpc
-          (json-encode
-           '(("jsonrpc" . "2.0")
-             ("method" . "notifications/initialized")))))
-        ,@body)
-    (mcp-server-lib-stop)))
+  (declare (indent defun) (debug t))
+  `(unwind-protect
+       (progn
+         (mcp-server-lib-start)
+         (mcp-server-lib-ert-assert-initialize-result
+          (mcp-server-lib-ert--get-initialize-result)
+          ,tools
+          ,resources)
+         ;; Send initialized notification - should return nil
+         (should-not
+          (mcp-server-lib-process-jsonrpc
+           (json-encode
+            '(("jsonrpc" . "2.0")
+              ("method" . "notifications/initialized")))))
+         ,@body)
+     (mcp-server-lib-stop)))
 
 (defun mcp-server-lib-ert-check-error-object
     (response expected-code expected-message)
   "Check that RESPONSE has error with EXPECTED-CODE and EXPECTED-MESSAGE."
   (let ((error-obj (mcp-server-lib-ert--validate-jsonrpc-response
                     response 'error)))
-    (should (equal expected-code (alist-get 'code error-obj)))
-    (should (equal expected-message (alist-get 'message error-obj)))))
+    (should (equal expected-code (plist-get error-obj :code)))
+    (should (equal expected-message (plist-get error-obj :message)))))
 
 ;; Private resource test helpers
 
@@ -348,8 +359,8 @@ Example:
 (defun mcp-server-lib-ert--read-resource (uri)
   "Send a resources/read request for URI and return the parsed response."
   (let ((request
-         (mcp-server-lib-create-resources-read-request
-          uri mcp-server-lib-ert--resource-read-request-id)))
+          (mcp-server-lib-create-resources-read-request
+           uri mcp-server-lib-ert--resource-read-request-id)))
     (mcp-server-lib-process-jsonrpc-parsed request)))
 
 (defun mcp-server-lib-ert-verify-resource-read (uri expected-fields)
@@ -360,26 +371,35 @@ EXPECTED-FIELDS is an alist of (field . value) pairs to verify in the content."
            (result (mcp-server-lib-ert--validate-jsonrpc-response
                     response 'result
                     mcp-server-lib-ert--resource-read-request-id))
-           (result-keys (mapcar #'car result)))
+           (result-keys (let ((keys nil) (plist result))
+                          (while plist
+                            (push (car plist) keys)
+                            (setq plist (cddr plist)))
+                          (nreverse keys))))
       ;; Check result structure
       (should (= 1 (length result-keys)))
-      (should (member 'contents result-keys))
+      (should (memq :contents result-keys))
       ;; Check contents array
-      (let ((contents (alist-get 'contents result)))
+      (let ((contents (plist-get result :contents)))
         (should (arrayp contents))
         (should (= 1 (length contents)))
         ;; Check content item structure
         (let* ((content (aref contents 0))
-               (content-keys (mapcar #'car content)))
+               (content-keys (let ((keys nil) (plist content))
+                               (while plist
+                                 (push (car plist) keys)
+                                 (setq plist (cddr plist)))
+                               (nreverse keys))))
           ;; Verify exact field count
           (should
            (= (length expected-fields) (length content-keys)))
           ;; Verify each expected field exists and has correct value
           (dolist (field expected-fields)
-            (should (member (car field) content-keys))
-            (should
-             (equal
-              (alist-get (car field) content) (cdr field)))))))))
+            (let ((field-key (intern (concat ":" (symbol-name (car field))))))
+              (should (memq field-key content-keys))
+              (should
+               (equal
+                (plist-get content field-key) (cdr field))))))))))
 
 (defun mcp-server-lib-ert-call-tool (tool-name params)
   "Call TOOL-NAME with PARAMS and return the text content string.
@@ -400,7 +420,7 @@ Returns:
       (let* ((request (mcp-server-lib-create-tools-call-request 
                        tool-name nil params))
              (response (mcp-server-lib-process-jsonrpc-parsed request)))
-        (should-not (alist-get 'error response))
+        (should-not (plist-get response :error))
         (mcp-server-lib-ert-check-text-response response)))))
 
 (defun mcp-server-lib-ert-process-tool-response (response)
@@ -411,13 +431,13 @@ Returns parsed JSON on success, signals `mcp-server-lib-tool-error' on failure.
 This function validates the response structure and handles the standard
 MCP tool response format with isError flag and content array."
   (let* ((mcp-result (mcp-server-lib-ert--validate-jsonrpc-response response 'result))
-         (is-error (eq (alist-get 'isError mcp-result) t))
+         (is-error (eq (plist-get mcp-result :isError) t))
          (result-text (mcp-server-lib-ert-check-text-response response is-error)))
     (if is-error
         ;; Tool returned an error - signal it
         (signal 'mcp-server-lib-tool-error (list result-text))
       ;; Success case - parse the JSON result
-      (json-read-from-string result-text))))
+      (mcp-server-lib--json-read-from-string result-text))))
 
 (provide 'mcp-server-lib-ert)
 
