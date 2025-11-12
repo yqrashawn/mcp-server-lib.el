@@ -46,6 +46,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'json)
 (require 'mcp-server-lib-metrics)
 (require 'gptel)
@@ -873,13 +874,41 @@ Returns a list of all registered resource templates."
        (apply handler args-vals)
        method-metrics))))
 
+(defun mcp-server-lib--parse-tool-arg (v)
+  (if (consp v)
+      (let ((val (cdr v)))
+        (if (eq val :json-false)
+            nil
+          val))
+    v))
+
+(defun mcp-server-lib--parse-tool-arg-vector (alist &optional keywordize)
+  (cl-loop for (k . v) in alist
+           nconc (list (if keywordize
+                           (intern (format ":%s" k))
+                         k)
+                       (if (eq v :json-false) nil v))))
+
+(defun mcp-server-lib--parse-tool-args (tool-args)
+  (let ((arg-vals (mapcar 'mcp-server-lib--parse-tool-arg tool-args)))
+    (mapcar
+     (lambda (v)
+       (if (vectorp v)
+           (mapcar
+            (lambda (vv) (mcp-server-lib--parse-tool-arg-vector vv t))
+            v)
+         v))
+     arg-vals)))
+
 (defun mcp-server-lib--handle-tools-call (id params method-metrics)
   "Handle tools/call request with ID and PARAMS.
 METHOD-METRICS is used to track errors for this method."
   (let* ((tool-name (alist-get 'name params))
          (tool (gethash tool-name mcp-server-lib--tools))
          (tool-args (alist-get 'arguments params))
-         (tool-args-vals (mapcar 'cdr tool-args)))
+         (tool-args-vals (mcp-server-lib--parse-tool-args tool-args)))
+    (setq aaa tool-args)
+    (mcp-server-lib--parse-tool-args aaa)
     (if tool
         (condition-case err
             (mcp-server-lib--handle-tools-call-apply
