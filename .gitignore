@@ -1,0 +1,11 @@
+**/.claude/settings.local.json
+*.elc
+*-autoloads.el
+*-pkg.el
+
+# Eask
+.eask/
+dist/
+
+# Planning documents
+jsonrpc-error-counter.patch

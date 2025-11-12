@@ -1,0 +1,380 @@
+#+TITLE: mcp-server-lib.el - Model Context Protocol Server Library for Emacs Lisp
+
+[[https://github.com/laurynas-biveinis/mcp-server-lib.el/actions/workflows/elisp-test.yml][https://github.com/laurynas-biveinis/mcp-server-lib.el/actions/workflows/elisp-test.yml/badge.svg]]
+[[https://github.com/laurynas-biveinis/mcp-server-lib.el/actions/workflows/linter.yml][https://github.com/laurynas-biveinis/mcp-server-lib.el/actions/workflows/linter.yml/badge.svg]]
+[[https://melpa.org/#/mcp-server-lib][https://melpa.org/packages/mcp-server-lib-badge.svg]]
+[[https://stable.melpa.org/#/mcp-server-lib][file:https://stable.melpa.org/packages/mcp-server-lib-badge.svg]]
+
+* Overview
+
+=mcp-server-lib.el= is a library for building [[https://modelcontextprotocol.io/][Model Context Protocol]] (MCP) servers in Emacs Lisp. It provides the infrastructure for Emacs packages to expose their functionality as tools and resources to Large Language Models.
+
+* Features
+
+- Simple API for registering tools (Elisp functions) and resources
+- Resource templates with URI pattern matching (RFC 6570 subset)
+- Handles MCP protocol communication and JSON-RPC messages
+- Stdio transport via emacsclient wrapper script
+- Built-in usage metrics and debugging support
+
+* Requirements
+
+- Emacs 27.1 or later
+- Running Emacs daemon (for stdio transport)
+
+* MCP servers built on this library
+
+- [[https://github.com/laurynas-biveinis/elisp-dev-mcp][elisp-dev-mcp]] - Elisp development support tools
+
+* Installation
+
+From MELPA:
+
+=M-x package-install RET mcp-server-lib RET=
+
+* For Users
+
+If you're using an MCP server built with this library:
+
+1. Run =M-x mcp-server-lib-install= to install the stdio script
+2. The script will be at =~/.emacs.d/emacs-mcp-stdio.sh=
+3. Follow your MCP server's documentation for client registration
+
+To uninstall: =M-x mcp-server-lib-uninstall=
+
+* For Developers
+
+To build your own MCP server, see [[https://github.com/laurynas-biveinis/elisp-dev-mcp][elisp-dev-mcp]] for a complete example.
+
+** Client Registration
+
+Register your MCP server with a client using the stdio script:
+
+#+BEGIN_EXAMPLE
+claude mcp add -s user -t stdio your-server -- ~/.emacs.d/emacs-mcp-stdio.sh \
+  --init-function=your-init-func --stop-function=your-stop-func
+#+END_EXAMPLE
+
+Script options:
+- =--init-function=NAME= - Emacs function to call on startup
+- =--stop-function=NAME= - Emacs function to call on shutdown
+- =--socket=PATH= - Custom Emacs server socket (optional)
+
+For debugging, set =EMACS_MCP_DEBUG_LOG= to a file path.
+
+** API Reference
+
+*** Registering Tools
+
+#+begin_src elisp
+(mcp-server-lib-register-tool #'my-function
+  :id "tool-name"
+  :description "What this tool does"
+  :title "Display Name"        ; optional
+  :read-only t)                ; optional
+
+;; Tool handler with one parameter
+(defun my-handler (location)
+  "Get weather for LOCATION.
+
+MCP Parameters:
+  location - city, address, or coordinates"
+  (mcp-server-lib-with-error-handling
+    ;; Your implementation
+    ))
+
+;; Tool handler with multiple parameters
+(defun update-todo-state (resource-uri current-state new-state)
+  "Update TODO state of a task.
+
+MCP Parameters:
+  resource-uri - URI of the task to update
+  current-state - Current TODO state (or empty string)
+  new-state - New TODO state to set"
+  (mcp-server-lib-with-error-handling
+    ;; Direct access to parameters, no alist-get needed
+    (message "Updating %s from %s to %s" 
+             resource-uri current-state new-state)))
+
+(mcp-server-lib-register-tool #'update-todo-state
+  :id "update-todo"
+  :description "Update task TODO state")
+#+end_src
+
+Tools can have zero, one, or multiple parameters. When a tool has multiple
+parameters, the JSON object fields from the client are automatically mapped to the
+function parameters by name (converting from camelCase to kebab-case as needed).
+
+Tool handlers must return strings or =nil= (which is converted to an empty string).
+Other return types will cause an "Invalid Params" error.
+
+If a tool cannot complete its operation successfully, it should use
+=mcp-server-lib-tool-throw= for throwing an error or the implementation should be
+wrapped with =mcp-server-lib-with-error-handling=.
+
+Optional properties:
+- =:title= - User-friendly display name
+- =:read-only= - Set to =t= if tool doesn't modify state
+
+*** Registering Resources
+
+The library uses a unified API for both static and templated resources. The presence of ={variable}= syntax automatically determines whether a resource is static or templated:
+
+#+begin_src elisp
+;; Static resource (no variables)
+(mcp-server-lib-register-resource "resource://uri"
+  (lambda () "resource content")
+  :name "Resource Name"
+  :description "What this provides"    ; optional
+  :mime-type "text/plain")             ; optional
+
+;; Dynamic resource example
+(mcp-server-lib-register-resource "buffer://current"
+  (lambda () (buffer-string))
+  :name "Current Buffer")
+
+;; Template resource with simple variable
+(mcp-server-lib-register-resource "org://{filename}"
+  (lambda (params)
+    (with-temp-buffer
+      (insert-file-contents (alist-get "filename" params nil nil #'string=))
+      (buffer-string)))
+  :name "Org file content"
+  :description "Read any org file by name")
+
+;; Template with multiple variables
+(mcp-server-lib-register-resource "org://{filename}/headline/{+path}"
+  (lambda (params)
+    (let ((file (alist-get "filename" params nil nil #'string=))
+          (path (alist-get "path" params nil nil #'string=)))
+      ;; path can contain slashes with {+path}
+      (org-get-headline-content file path)))
+  :name "Org headline"
+  :description "Get specific headline from org file")
+#+end_src
+
+Static resource handlers take no arguments and return strings. Template resource handlers receive an alist of parameters extracted from the URI.
+
+Supported template syntax (RFC 6570 subset):
+- ={variable}= - Simple variable expansion
+- ={+variable}= - Reserved expansion (allows slashes)
+
+Direct resources take precedence over templates when both match a URI.
+
+*** Resource Error Handling
+
+Resource handlers can signal specific JSON-RPC error codes to provide meaningful error information to clients:
+
+#+begin_src elisp
+;; Signal that client provided invalid parameters
+(defun my-file-resource-handler (params)
+  (let ((file (alist-get "filename" params nil nil #'string=)))
+    (unless (file-exists-p file)
+      (mcp-server-lib-resource-signal-error
+       mcp-server-lib-jsonrpc-error-invalid-params
+       (format "File not found: %s" file)))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (buffer-string))))
+
+;; Signal an internal server error
+(defun my-database-resource-handler ()
+  (unless (database-connected-p)
+    (mcp-server-lib-resource-signal-error
+     mcp-server-lib-jsonrpc-error-internal
+     "Database connection unavailable"))
+  (query-database))
+#+end_src
+
+Available error codes:
+- =mcp-server-lib-jsonrpc-error-invalid-params= (-32602): Client provided invalid parameters, resource not found
+- =mcp-server-lib-jsonrpc-error-internal= (-32603): Server-side processing error
+
+It is also possible to use regular =error= or =signal= calls, which would return internal error (-32603).
+
+*** Working with Resource Templates
+
+Resource template handlers receive extracted parameters as an alist. These parameters are matched from the URI but not automatically decoded - if you're working with file paths that might contain special characters, you'll want to decode them:
+
+#+begin_src elisp
+(mcp-server-lib-register-resource "file://{path}"
+  (lambda (params)
+    (let ((path (alist-get "path" params nil nil #'string=)))
+      ;; Decode if needed for filesystem access
+      (with-temp-buffer
+        (insert-file-contents (url-unhex-string path))
+        (buffer-string))))
+  :name "File reader")
+#+end_src
+
+Variable names in templates follow simple rules - stick to letters, numbers, and underscores. The URI scheme (like =file://= or =org://=) needs to be a valid URI scheme starting with a letter. URI schemes are case-insensitive per RFC 3986, so =HTTP://example.com= will match a template registered as =http://{domain}=.
+
+When multiple templates could match the same URI, which template is selected is undefined and depends on implementation details. Avoid registering overlapping templates.
+
+Templates can match empty values too - =org://= will match =org://{filename}= with an empty filename.
+
+Literal segments in templates must match exactly - =test://items/{id}= will match =test://items/123= but not =test://item/123=.
+
+The implementation uses non-greedy (first-match) behavior when matching variables. For example, =test://{name}.txt= matching =test://file.config.txt= extracts =name="file.config"=, not =name="file.config.txt"=.
+
+To unregister any resource (static or templated):
+
+#+begin_src elisp
+(mcp-server-lib-unregister-resource "org://{filename}")
+(mcp-server-lib-unregister-resource "resource://uri")
+#+end_src
+
+*** Resource Lists
+
+When clients request the resource list, direct resources appear with a =uri= field while templates show up with a =uriTemplate= field. This helps clients distinguish between static resources and dynamic patterns they can use.
+
+*** Constants
+
+=mcp-server-lib-name= - The name of the MCP server ("emacs-mcp-server-lib")
+
+=mcp-server-lib-protocol-version= - The MCP protocol version supported by this server ("2025-03-26")
+
+*** Utility Functions
+
+For testing and debugging:
+
+#+begin_src elisp
+;; Create JSON-RPC requests
+(mcp-server-lib-create-tools-list-request &optional id)
+(mcp-server-lib-create-tools-call-request tool-name &optional id args)
+(mcp-server-lib-create-resources-list-request &optional id)
+(mcp-server-lib-create-resources-read-request uri &optional id)
+
+;; Process requests and get parsed response
+(mcp-server-lib-process-jsonrpc-parsed request)
+
+;; Server management
+(mcp-server-lib-start)
+(mcp-server-lib-stop)
+#+end_src
+
+*** Test Utilities
+
+The =mcp-server-lib-ert= module provides utilities for writing ERT tests for MCP servers:
+
+#+begin_src elisp
+;; Track metrics changes during test execution
+(mcp-server-lib-ert-with-metrics-tracking
+    ((method expected-calls expected-errors) ...)
+  ;; Test code here
+  )
+
+;; Example: Verify a method is called once with no errors
+(mcp-server-lib-ert-with-metrics-tracking
+    (("tools/list" 1 0))
+  ;; Code that should call tools/list once
+  (mcp-server-lib-process-jsonrpc-parsed
+   (mcp-server-lib-create-tools-list-request)))
+
+;; Simplified syntax for verifying successful single method calls
+(mcp-server-lib-ert-verify-req-success "tools/list"
+  (mcp-server-lib-process-jsonrpc-parsed
+   (mcp-server-lib-create-tools-list-request)))
+
+;; Process a request and get the successful result
+(let* ((request (mcp-server-lib-create-tools-list-request))
+       (tools (mcp-server-lib-ert-get-success-result "tools/list" request)))
+  ;; tools contains the result field from the response
+  (should (arrayp tools)))
+
+;; High-level tool testing helper - simplifies tool calls
+;; This function combines request creation, processing, metrics verification,
+;; and text extraction into a single call
+(let* ((params '(("name" . "John") ("greeting" . "Hello")))
+       (result (mcp-server-lib-ert-call-tool "greet-user" params)))
+  (should (string= "Hello, John!" result)))
+
+;; Get resource list (convenience function)
+(let ((resources (mcp-server-lib-ert-get-resource-list)))
+  (should (= 2 (length resources)))
+  (should (string= "test://resource1"
+                   (alist-get 'uri (aref resources 0)))))
+
+;; Check error response structure
+(mcp-server-lib-ert-check-error-object response -32601 "Method not found")
+
+;; Verify resource read succeeds with expected fields
+(mcp-server-lib-ert-verify-resource-read
+ "test://resource1"
+ '((uri . "test://resource1")
+   (mimeType . "text/plain")
+   (text . "test result")))
+
+;; Run tests with MCP server
+(mcp-server-lib-ert-with-server :tools nil :resources nil
+  ;; Server is started, initialized, and will be stopped after body
+  (let ((response (mcp-server-lib-process-jsonrpc-parsed
+                   (json-encode '(("jsonrpc" . "2.0")
+                                  ("method" . "tools/list")
+                                  ("id" . 1))))))
+    (should-not (alist-get 'error response))))
+#+end_src
+
+*** JSON-RPC Error Constants
+
+The library provides public constants for standard JSON-RPC 2.0 error codes:
+
+#+begin_src elisp
+mcp-server-lib-jsonrpc-error-parse           ; -32700 Parse Error
+mcp-server-lib-jsonrpc-error-invalid-request ; -32600 Invalid Request
+mcp-server-lib-jsonrpc-error-method-not-found ; -32601 Method Not Found  
+mcp-server-lib-jsonrpc-error-invalid-params  ; -32602 Invalid Params
+mcp-server-lib-jsonrpc-error-internal        ; -32603 Internal Error
+#+end_src
+
+These constants can be used when checking error responses in tests:
+
+#+begin_src elisp
+(mcp-server-lib-ert-check-error-object 
+  response 
+  mcp-server-lib-jsonrpc-error-method-not-found
+  "Method not found")
+#+end_src
+
+*** Debugging
+
+Enable JSON-RPC message logging:
+
+#+begin_src elisp
+(setq mcp-server-lib-log-io t)  ; Log to *mcp-server-lib-log* buffer
+#+end_src
+
+View usage metrics:
+
+#+begin_src elisp
+M-x mcp-server-lib-show-metrics
+M-x mcp-server-lib-reset-metrics
+#+end_src
+
+** Customization
+
+To install the script to a different location:
+
+#+begin_src elisp
+(setq mcp-server-lib-install-directory "/path/to/directory")
+#+end_src
+
+* Troubleshooting
+
+- **Script not found**: Run =M-x mcp-server-lib-install= first
+- **Connection errors**: Ensure Emacs daemon is running
+- **Debugging**: Set =mcp-server-lib-log-io= to =t= and check =*mcp-server-lib-log*= buffer
+
+* Similar packages
+
+- https://github.com/utsahi/mcp-server.el
+- https://github.com/rhblind/emacs-mcp-server
+
+* License
+
+This project is licensed under the GNU General Public License v3.0 (GPLv3) - see the LICENSE file for details.
+
+* Acknowledgments
+
+- [[https://modelcontextprotocol.io/][Model Context Protocol]] specification
+- [[https://github.com/modelcontextprotocol/python-sdk][Python MCP SDK]] implementation

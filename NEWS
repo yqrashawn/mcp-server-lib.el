@@ -1,0 +1,66 @@
+mcp-server-lib.el NEWS -- history of user-visible changes
+
+* Changes in mcp-server-lib 0.2.0 (unreleased)
+
+** New Features
+*** Multi-parameter tool support
+    Tools can now accept multiple parameters. The library automatically maps
+    JSON object fields to function parameters using camelCase to kebab-case
+    conversion. Parameters are validated - missing required parameters or
+    unexpected parameters will return appropriate JSON-RPC errors.
+
+*** Enhanced testing support for MCP servers
+    The library now provides testing utilities through the mcp-server-lib-ert
+    module for dependent packages.
+
+*** Resource error handling with custom error codes
+    Resource handlers can now signal specific JSON-RPC error codes using
+    mcp-server-lib-resource-signal-error to provide meaningful error
+    information to MCP clients.
+
+** Bug Fixes
+*** Enforced tool handler return type validation
+    Tool handlers must now return strings or nil. Previously, handlers could
+    return any Elisp value which would be serialized, violating the MCP protocol.
+    This is a breaking change for tools that returned non-string values.
+    See https://github.com/laurynas-biveinis/mcp-server-lib.el/issues/4
+
+*** Fixed resources/list endpoint to match MCP specification
+    resources/list now correctly returns only direct resources,
+    while templates are returned via the separate resources/templates/list
+    endpoint as required by the protocol.
+
+** API Changes
+*** Made mcp-server-lib-name a public constant
+
+*** Added public constants for JSON-RPC error codes
+    - mcp-server-lib-jsonrpc-error-parse (-32700)
+    - mcp-server-lib-jsonrpc-error-invalid-request (-32600)
+    - mcp-server-lib-jsonrpc-error-method-not-found (-32601)
+    - mcp-server-lib-jsonrpc-error-invalid-params (-32602)
+    - mcp-server-lib-jsonrpc-error-internal (-32603)
+
+*** Added ERT testing utilities
+    - mcp-server-lib-ert-with-server
+    - mcp-server-lib-ert-verify-resource-read
+    - mcp-server-lib-ert-check-error-object
+    - mcp-server-lib-ert-get-resource-list
+    - mcp-server-lib-ert-get-success-result
+    - mcp-server-lib-ert-verify-req-success
+    - mcp-server-lib-ert-with-metrics-tracking
+    - mcp-server-lib-ert-assert-initialize-result
+    - mcp-server-lib-ert-get-initialize-result
+
+*** Added resource error signaling API
+    - mcp-server-lib-resource-signal-error for signaling custom error codes
+
+* Changes in mcp-server-lib 0.1.0 (2025-07-22)
+
+** Initial release
+*** Core MCP server functionality
+*** Tool registration and invocation
+*** Resource registration (static and templates with {variable} syntax)
+*** JSON-RPC communication
+*** Stdio transport support via emacs-mcp-stdio.sh
+*** Metrics collection and reporting
+*** Basic testing utilities
