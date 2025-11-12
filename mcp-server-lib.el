@@ -50,6 +50,42 @@
 (require 'mcp-server-lib-metrics)
 (require 'gptel)
 (require 'gptel-openai)
+(require 'lgr)
+(require 'dash)
+
+(defvar mcp-server-lib-logger (lgr-get-logger "mcp-server-lib"))
+
+(progn
+  (lgr-reset-appenders mcp-server-lib-logger)
+  (-> mcp-server-lib-logger
+      (lgr-add-appender
+       (-> (lgr-appender-file
+            :file (file-truename "~/Dropbox/sync/gptelt.log"))
+           (lgr-set-layout
+            (lgr-layout-format
+             :format "** [%t] :%L: %m %j\n#+end_src"
+             :timestamp-format "%Y-%m-%d %a %H:%M %z"))))
+      (lgr-set-threshold lgr-level-debug)))
+
+(defvar mcp-server-lib-log-persist-all-log t)
+
+(defun mcp-server-lib-log-tool-call
+    (tool-name tool-args result is-error)
+  ;; Use mcp-server-lib--json-encode which already handles :json-false/:null correctly
+  (condition-case nil
+      (when (or mcp-server-lib-log-persist-all-log is-error)
+        (let ((buffer-file-coding-system 'utf-8-unix)
+              (coding-system-for-read 'utf-8-unix)
+              (coding-system-for-write 'utf-8-unix))
+          (lgr-debug
+              mcp-server-lib-logger
+            (if is-error
+                ":%s:error:\n#+begin_src json-ts\n"
+              ":%s:\n#+begin_src json-ts\n")
+            tool-name
+            :args (format "%s" tool-args)
+            :rst result)))
+    (-const nil)))
 
 ;;; JSON encoding compatibility
 
@@ -754,7 +790,7 @@ Returns a list of all registered resource templates."
      id `((resourceTemplates . ,template-list)))))
 
 (defun mcp-server-lib--handle-tools-call-handle-result
-    (id tool result method-metrics)
+    (id args-vals tool result method-metrics)
   (let ((context (list :id id))
         (tool-name (plist-get tool :id)))
     (condition-case err
@@ -775,9 +811,11 @@ Returns a list of all registered resource templates."
                  ,(vector
                    `((type . "text") (text . ,result-text))))
                 (isError . :json-false))))
+          (mcp-server-lib-log-tool-call tool-name args-vals result-text nil)
           (mcp-server-lib-metrics--track-tool-call tool-name)
           (mcp-server-lib--respond-with-result
            context formatted-result))
+      (mcp-server-lib-log-tool-call tool-name args-vals nil t)
       ;; Handle invalid parameter errors
       (mcp-server-lib-invalid-params
        (mcp-server-lib-metrics--track-tool-call tool-name t)
@@ -825,11 +863,12 @@ Returns a list of all registered resource templates."
         (apply handler
                (lambda (result)
                  (mcp-server-lib--handle-tools-call-handle-result
-                  id tool result method-metrics))
+                  id args-vals tool result method-metrics))
                args-vals)
       ;; Sync handler: call directly and handle result
       (mcp-server-lib--handle-tools-call-handle-result
        id
+       args-vals
        tool
        (apply handler args-vals)
        method-metrics))))
@@ -848,6 +887,7 @@ METHOD-METRICS is used to track errors for this method."
              tool
              tool-args-vals
              method-metrics)
+          (mcp-server-lib-log-tool-call tool-name tool-args-vals nil t)
           ;; Handle invalid parameter errors
           (mcp-server-lib-invalid-params
            (mcp-server-lib-metrics--track-tool-call tool-name t)
