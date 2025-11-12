@@ -162,7 +162,9 @@ Keys are URI templates, values are plists with template metadata and handlers.")
 
 (defun mcp-server-lib--jsonrpc-response (id result)
   "Create a JSON-RPC response with ID and RESULT."
-  (mcp-server-lib--json-encode `((jsonrpc . "2.0") (id . ,id) (result . ,result))))
+  (decode-coding-string
+   (mcp-server-lib--json-encode `((jsonrpc . "2.0") (id . ,id) (result . ,result)))
+   'utf-8 t))
 
 
 (defun mcp-server-lib--convert-gptel-args-to-schema (gptel-args)
@@ -279,10 +281,12 @@ Returns t if item was found, nil otherwise."
 
 (defun mcp-server-lib--jsonrpc-error (id code message)
   "Create a JSON-RPC error response with ID, error CODE and MESSAGE."
-  (mcp-server-lib--json-encode
-   `((jsonrpc . "2.0")
-     (id . ,id)
-     (error . ((code . ,code) (message . ,message))))))
+  (decode-coding-string
+   (mcp-server-lib--json-encode
+    `((jsonrpc . "2.0")
+      (id . ,id)
+      (error . ((code . ,code) (message . ,message)))))
+   'utf-8 t))
 
 (defun mcp-server-lib--append-optional-fields (alist &rest pairs)
   "Append optional field PAIRS to ALIST.
@@ -810,23 +814,20 @@ Returns a list of all registered resource templates."
 
 (defun mcp-server-lib--handle-tools-call-apply
     (id tool args-vals method-metrics)
-  (let ((context (list :id id))
-        (is-async (plist-get tool :async))
-        (handler
-         (lambda (&rest args)
-           (let ((default-directory
-                  (if (fboundp '++workspace-current-project-root)
-                      (++workspace-current-project-root)
-                    default-directory)))
-             (apply (plist-get tool :handler) args)))))
+  (let* ((is-async (plist-get tool :async))
+         (handler (plist-get tool :handler))
+         (default-directory
+          (if (fboundp '++workspace-current-project-root)
+              (++workspace-current-project-root)
+            default-directory)))
     (if is-async
-        (apply
-         handler
-         (lambda (result)
-           (mcp-server-lib--handle-tools-call-handle-result
-            id tool result method-metrics))
-         args-vals)
-      
+        ;; Async handler: pass callback as first arg, then tool args
+        (apply handler
+               (lambda (result)
+                 (mcp-server-lib--handle-tools-call-handle-result
+                  id tool result method-metrics))
+               args-vals)
+      ;; Sync handler: call directly and handle result
       (mcp-server-lib--handle-tools-call-handle-result
        id
        tool
@@ -839,8 +840,7 @@ METHOD-METRICS is used to track errors for this method."
   (let* ((tool-name (alist-get 'name params))
          (tool (gethash tool-name mcp-server-lib--tools))
          (tool-args (alist-get 'arguments params))
-         (tool-args-vals (mapcar 'cdr tool-args))
-         (handler (plist-get tool :handler)))
+         (tool-args-vals (mapcar 'cdr tool-args)))
     (if tool
         (condition-case err
             (mcp-server-lib--handle-tools-call-apply
@@ -993,10 +993,12 @@ See also: `mcp-server-lib-process-jsonrpc'"
 (defun mcp-server-lib-create-tools-list-request (&optional id)
   "Create a tools/list JSON-RPC request with optional ID.
 If ID is not provided, it defaults to 1."
-  (mcp-server-lib--json-encode
-   `(("jsonrpc" . "2.0")
-     ("method" . "tools/list")
-     ("id" . ,(or id 1)))))
+  (decode-coding-string
+   (mcp-server-lib--json-encode
+    `(("jsonrpc" . "2.0")
+      ("method" . "tools/list")
+      ("id" . ,(or id 1))))
+   'utf-8 t))
 
 (defun mcp-server-lib-create-tools-call-request
     (tool-name &optional id args)
@@ -1009,28 +1011,34 @@ ARGS is an association list of arguments to pass to the tool.
 Example:
   (mcp-server-lib-create-tools-call-request
    \"list-files\" 42 \\='((\"path\" . \"/tmp\")))"
-  (mcp-server-lib--json-encode
-   `(("jsonrpc" . "2.0")
-     ("method" . "tools/call") ("id" . ,(or id 1))
-     ("params" .
-      (("name" . ,tool-name) ("arguments" . ,(or args '())))))))
+  (decode-coding-string
+   (mcp-server-lib--json-encode
+    `(("jsonrpc" . "2.0")
+      ("method" . "tools/call") ("id" . ,(or id 1))
+      ("params" .
+       (("name" . ,tool-name) ("arguments" . ,(or args '()))))))
+   'utf-8 t))
 
 (defun mcp-server-lib-create-resources-list-request (&optional id)
   "Create a resources/list JSON-RPC request with optional ID.
 If ID is not provided, it defaults to 1."
-  (mcp-server-lib--json-encode
-   `(("jsonrpc" . "2.0")
-     ("method" . "resources/list")
-     ("id" . ,(or id 1)))))
+  (decode-coding-string
+   (mcp-server-lib--json-encode
+    `(("jsonrpc" . "2.0")
+      ("method" . "resources/list")
+      ("id" . ,(or id 1))))
+   'utf-8 t))
 
 (defun mcp-server-lib-create-resources-templates-list-request
     (&optional id)
   "Create a resources/templates/list JSON-RPC request with optional ID.
 If ID is not provided, it defaults to 1."
-  (mcp-server-lib--json-encode
-   `(("jsonrpc" . "2.0")
-     ("method" . "resources/templates/list")
-     ("id" . ,(or id 1)))))
+  (decode-coding-string
+   (mcp-server-lib--json-encode
+    `(("jsonrpc" . "2.0")
+      ("method" . "resources/templates/list")
+      ("id" . ,(or id 1))))
+   'utf-8 t))
 
 (defun mcp-server-lib-create-resources-read-request (uri &optional id)
   "Create a resources/read JSON-RPC request for URI with optional ID.
@@ -1042,11 +1050,13 @@ Arguments:
 
 Example:
   (mcp-server-lib-create-resources-read-request \"test://resource\" 42)"
-  (mcp-server-lib--json-encode
-   `(("jsonrpc" . "2.0")
-     ("method" . "resources/read")
-     ("id" . ,(or id 1))
-     ("params" . (("uri" . ,uri))))))
+  (decode-coding-string
+   (mcp-server-lib--json-encode
+    `(("jsonrpc" . "2.0")
+      ("method" . "resources/read")
+      ("id" . ,(or id 1))
+      ("params" . (("uri" . ,uri)))))
+   'utf-8 t))
 
 ;;; API - Tools
 
@@ -1174,22 +1184,7 @@ See also:
          (func (gptel-tool-function gptel-tool))
          (description (gptel-tool-description gptel-tool))
          (args (gptel-tool-args gptel-tool))
-         (is-async (gptel-tool-async gptel-tool))
-         ;; Create a wrapper function that handles async if needed
-         ;; (handler
-         ;;  (if is-async
-         ;;      ;; For async tools, we need to handle the callback
-         ;;      ;; This is a simplified wrapper - may need adjustment
-         ;;      (lambda (&rest tool-args)
-         ;;        (let ((result nil)
-         ;;              (callback (lambda (res) (setq result res))))
-         ;;          (apply func callback tool-args)
-         ;;          ;; Note: This is synchronous wait - in real async we'd need better handling
-         ;;          (while (null result)
-         ;;            (sleep-for 0.1))
-         ;;          result))
-         ;;    func))
-         )
+         (is-async (gptel-tool-async gptel-tool)))
 
     (mcp-server-lib-register-tool
      func
