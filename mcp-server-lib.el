@@ -137,6 +137,13 @@ Defaults to `user-emacs-directory' but can be customized."
   :type 'directory
   :group 'mcp-server-lib)
 
+(defcustom mcp-server-lib-async-timeout 60
+  "Timeout in seconds for async tool operations.
+When a tool is registered with :async t, the server will wait up to this
+many seconds for the async callback to complete before returning a timeout error."
+  :type 'number
+  :group 'mcp-server-lib)
+
 ;;; Public Constants
 
 (defconst mcp-server-lib-name "emacs-mcp-server-lib"
@@ -860,12 +867,52 @@ Returns a list of all registered resource templates."
               (++workspace-current-project-root)
             default-directory)))
     (if is-async
-        ;; Async handler: pass callback as first arg, then tool args
-        (apply handler
-               (lambda (result)
-                 (mcp-server-lib--handle-tools-call-handle-result
-                  id args-vals tool result method-metrics))
-               args-vals)
+        ;; Async handler: use promise-like pattern with polling
+        (let ((result-cell (list nil))  ; mutable cell for result
+              (done-cell (list nil))    ; mutable cell for completion flag
+              (error-cell (list nil)))  ; mutable cell for error
+          ;; Start async operation with callback
+          (condition-case err
+              (apply handler
+                     (lambda (result)
+                       ;; Callback stores result and marks as done
+                       (setcar result-cell result)
+                       (setcar done-cell t))
+                     args-vals)
+            (error
+             ;; Capture errors during handler invocation
+             (setcar error-cell err)
+             (setcar done-cell t)))
+          
+          ;; Poll until done or timeout
+          (let ((timeout mcp-server-lib-async-timeout)
+                (elapsed 0)
+                (poll-interval 0.1))  ; 100ms polling interval
+            (while (and (not (car done-cell))
+                        (< elapsed timeout))
+              (sleep-for poll-interval)
+              (setq elapsed (+ elapsed poll-interval)))
+            
+            ;; Check results
+            (cond
+             ;; Error during handler invocation
+             ((car error-cell)
+              (mcp-server-lib--jsonrpc-error
+               id
+               mcp-server-lib-jsonrpc-error-internal
+               (format "Error starting async operation: %s"
+                       (error-message-string (car error-cell)))))
+             ;; Timeout
+             ((not (car done-cell))
+              (cl-incf (mcp-server-lib-metrics-errors method-metrics))
+              (mcp-server-lib--jsonrpc-error
+               id
+               mcp-server-lib-jsonrpc-error-internal
+               (format "Async operation timeout (%ds)" mcp-server-lib-async-timeout)))
+             ;; Success - handle result
+             (t
+              (mcp-server-lib--handle-tools-call-handle-result
+               id args-vals tool (car result-cell) method-metrics)))))
       ;; Sync handler: call directly and handle result
       (mcp-server-lib--handle-tools-call-handle-result
        id
@@ -907,8 +954,8 @@ METHOD-METRICS is used to track errors for this method."
          (tool (gethash tool-name mcp-server-lib--tools))
          (tool-args (alist-get 'arguments params))
          (tool-args-vals (mcp-server-lib--parse-tool-args tool-args)))
-    (setq aaa tool-args)
-    (mcp-server-lib--parse-tool-args aaa)
+    ;; (setq aaa tool-args)
+    ;; (mcp-server-lib--parse-tool-args aaa)
     (if tool
         (condition-case err
             (mcp-server-lib--handle-tools-call-apply
