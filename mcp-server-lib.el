@@ -137,7 +137,7 @@ Defaults to `user-emacs-directory' but can be customized."
   :type 'directory
   :group 'mcp-server-lib)
 
-(defcustom mcp-server-lib-async-timeout 60
+(defcustom mcp-server-lib-async-timeout 300
   "Timeout in seconds for async tool operations.
 When a tool is registered with :async t, the server will wait up to this
 many seconds for the async callback to complete before returning a timeout error."
@@ -890,7 +890,7 @@ Returns a list of all registered resource templates."
                 (poll-interval 0.1))  ; 100ms polling interval
             (while (and (not (car done-cell))
                         (< elapsed timeout))
-              (sit-for poll-interval t)  ; Use sit-for to allow event loop processing
+              (sit-for poll-interval nil)  ; Use sit-for with nil to process timers
               (setq elapsed (+ elapsed poll-interval)))
             
             ;; Check results
