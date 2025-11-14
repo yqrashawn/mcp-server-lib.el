@@ -890,7 +890,7 @@ Returns a list of all registered resource templates."
                 (poll-interval 0.1))  ; 100ms polling interval
             (while (and (not (car done-cell))
                         (< elapsed timeout))
-              (sleep-for poll-interval)
+              (sit-for poll-interval t)  ; Use sit-for to allow event loop processing
               (setq elapsed (+ elapsed poll-interval)))
             
             ;; Check results
