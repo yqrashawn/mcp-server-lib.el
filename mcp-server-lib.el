@@ -1298,7 +1298,8 @@ See also:
   (unless (gptel-tool-p gptel-tool)
     (error "Argument must be a gptel-tool struct"))
 
-  (let* ((name (format "emacs_mcp_%s" (gptel-tool-name gptel-tool)))
+  (let* (;; (name (format "emacs_mcp_%s" (gptel-tool-name gptel-tool)))
+         (name (gptel-tool-name gptel-tool))
          (func (gptel-tool-function gptel-tool))
          (description (gptel-tool-description gptel-tool))
          (args (gptel-tool-args gptel-tool))
