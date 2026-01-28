@@ -930,17 +930,32 @@ Returns a list of all registered resource templates."
     v))
 
 (defun mcp-server-lib--parse-tool-arg-vector (alist &optional keywordize)
+  "Convert alist to plist with optional keywordization.
+Recursively handles nested vectors and converts :json-false to nil."
   (cl-loop for (k . v) in alist
            nconc (list (if keywordize
                            (intern (format ":%s" k))
                          k)
-                       (if (eq v :json-false) nil v))))
+                       ;; Recursively parse nested structures
+                       (cond
+                        ((eq v :json-false) nil)
+                        ((vectorp v) 
+                         ;; Nested vector - recursively parse each element
+                         (mapcar (lambda (vv) 
+                                   (if (listp vv)
+                                       (mcp-server-lib--parse-tool-arg-vector vv t)
+                                     vv))
+                                 v))
+                        (t v)))))
 
 (defun mcp-server-lib--parse-tool-args (tool-args)
+  "Recursively parse tool arguments, converting JSON structures to Elisp.
+Handles nested vectors (JSON arrays) and converts alists to plists with keywords."
   (let ((arg-vals (mapcar 'mcp-server-lib--parse-tool-arg tool-args)))
     (mapcar
      (lambda (v)
        (if (vectorp v)
+           ;; Convert vector to list of plists
            (mapcar
             (lambda (vv) (mcp-server-lib--parse-tool-arg-vector vv t))
             v)
