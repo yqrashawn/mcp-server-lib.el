@@ -54,9 +54,8 @@ See also: `mcp-server-lib-stop'"
   "Stop the MCP server from processing client requests.
 
 Sets the server state to stopped, which prevents further processing of
-client requests.  Note that this does not release any resources or unregister
-tools, it simply prevents `mcp-server-lib-process-jsonrpc' from accepting new
-requests.
+client requests.  Cancels all pending async operations and their timers
+to ensure clean shutdown.
 
 See also: `mcp-server-lib-start'"
   (interactive)
@@ -65,8 +64,17 @@ See also: `mcp-server-lib-start'"
 
   (when (called-interactively-p 'any)
     (message "Emacs stopping handling MCP requests"))
+  
+  ;; Cancel all pending async operation timers
+  (dolist (op mcp-server-lib--pending-async-operations)
+    (let ((timer (cdr op)))
+      (when (timerp timer)
+        (cancel-timer timer))))
+  (setq mcp-server-lib--pending-async-operations nil)
+  
   ;; Mark server as not running
   (setq mcp-server-lib--running nil)
+  
   ;; Show metrics summary if there are any
   (when (> (hash-table-count mcp-server-lib-metrics--table) 0)
     (message "%s" (mcp-server-lib-metrics-summary)))

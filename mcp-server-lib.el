@@ -56,12 +56,20 @@
 
 (defvar mcp-server-lib-logger (lgr-get-logger "mcp-server-lib"))
 
-(progn
+(defcustom mcp-server-lib-log-file
+  (expand-file-name "~/Dropbox/sync/gptelt.log")
+  "File path for MCP server tool call logging.
+Set to nil to disable file logging."
+  :type '(choice (const :tag "No logging" nil)
+          (file :tag "Log file path"))
+  :group 'mcp-server-lib)
+
+(when mcp-server-lib-log-file
   (lgr-reset-appenders mcp-server-lib-logger)
   (-> mcp-server-lib-logger
       (lgr-add-appender
        (-> (lgr-appender-file
-            :file (file-truename "~/Dropbox/sync/gptelt.log"))
+            :file (file-truename mcp-server-lib-log-file))
            (lgr-set-layout
             (lgr-layout-format
              :format "** [%t] :%L: %m %j\n#+end_src"
@@ -189,6 +197,10 @@ of letters, digits, plus, period, or hyphen, ending with ://")
 
 (defvar mcp-server-lib--running nil
   "Whether the MCP server is currently running.")
+
+(defvar mcp-server-lib--pending-async-operations nil
+  "List of pending async operations for cleanup on shutdown.
+Each entry is a cons of (process . timer).")
 
 (defvar mcp-server-lib--tools (make-hash-table :test 'equal)
   "Hash table of registered MCP tools.")
@@ -884,13 +896,15 @@ Returns a list of all registered resource templates."
              (setcar error-cell err)
              (setcar done-cell t)))
           
-          ;; Poll until done or timeout
+          ;; Poll until done or timeout with proper event processing
           (let ((timeout mcp-server-lib-async-timeout)
                 (elapsed 0)
                 (poll-interval 0.1))  ; 100ms polling interval
             (while (and (not (car done-cell))
                         (< elapsed timeout))
-              (sit-for poll-interval nil)  ; Use sit-for with nil to process timers
+              ;; CRITICAL: Process async events to allow callbacks to execute
+              ;; Use accept-process-output with no specific process to handle all pending output
+              (accept-process-output nil poll-interval nil t)
               (setq elapsed (+ elapsed poll-interval)))
             
             ;; Check results

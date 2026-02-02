@@ -127,20 +127,24 @@ PROC is the process, REQUEST is headers."
       (if (string-empty-p body)
           (mcp-server-lib-http--send-error
            proc 400 "Empty request body")
-        (condition-case err
-            (let ((response (mcp-server-lib-process-jsonrpc body)))
-              (mcp-server-lib-http--log "Response: %s" response)
-              (if response
-                  (mcp-server-lib-http--send-response proc response)
-                ;; Notification - no response needed
-                (with-temp-buffer
-                  (httpd-send-header proc "text/plain" 204))))
-          (json-error
-           (mcp-server-lib-http--send-error
-            proc 400 (format "Invalid JSON: %s" (error-message-string err))))
-          (error
-           (mcp-server-lib-http--send-error
-            proc 500 (format "Internal error: %s" (error-message-string err)))))))
+        ;; Process request in a separate thread to avoid blocking main UI
+        (make-thread
+         (lambda ()
+           (condition-case err
+               (let ((response (mcp-server-lib-process-jsonrpc body)))
+                 (mcp-server-lib-http--log "Response: %s" response)
+                 (if response
+                     (mcp-server-lib-http--send-response proc response)
+                   ;; Notification - no response needed
+                   (with-temp-buffer
+                     (httpd-send-header proc "text/plain" 204))))
+             (json-error
+              (mcp-server-lib-http--send-error
+               proc 400 (format "Invalid JSON: %s" (error-message-string err))))
+             (error
+              (mcp-server-lib-http--send-error
+               proc 500 (format "Internal error: %s" (error-message-string err))))))
+         "mcp-http-handler")))
 
      ;; Reject other methods
      (t
