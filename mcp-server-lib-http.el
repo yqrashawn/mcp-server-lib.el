@@ -30,8 +30,9 @@
 ;;   (mcp-server-lib-http-start :port 9000)  ; Custom port
 ;;   (mcp-server-lib-http-stop)   ; Stop server
 ;;
-;; The server exposes a single endpoint:
+;; The server exposes two endpoints:
 ;;   POST /mcp/v1/messages - Process JSON-RPC requests
+;;   POST /mcp/v1/sessions/{id}/messages - Session-scoped JSON-RPC requests
 ;;
 ;; Example with curl:
 ;;   curl -X POST http://localhost:8080/mcp/v1/messages \
@@ -103,13 +104,12 @@
 
 ;;; Request handlers
 
-(defun httpd/mcp/v1/messages (proc _uri-path _uri-query request)
-  "Handle POST requests to /mcp/v1/messages endpoint.
-PROC is the process, REQUEST is headers."
-  (mcp-server-lib-http--log "Received request to /mcp/v1/messages")
-
-  (let* ((method (caar request))  ; First element is (METHOD PATH VERSION)
-         (content (cadr (assoc "Content" request)))  ; POST data is in Content
+(defun mcp-server-lib-http--handle-jsonrpc-request (proc request &optional session-id)
+  "Handle a JSON-RPC HTTP request from PROC with REQUEST headers.
+If SESSION-ID is non-nil, bind `mcp-server-lib--request-session-id'
+during processing so that tool handlers can resolve per-session state."
+  (let* ((method (caar request))
+         (content (cadr (assoc "Content" request)))
          (body (or content "")))
 
     (mcp-server-lib-http--log "Method: %s" method)
@@ -134,28 +134,46 @@ PROC is the process, REQUEST is headers."
         ;; thread.  `run-at-time 0' defers to the next event-loop
         ;; iteration, keeping the httpd process filter responsive while
         ;; allowing `recursive-edit' to work correctly.
-        (run-at-time
-         0 nil
-         (lambda ()
-           (condition-case err
-               (let ((response (mcp-server-lib-process-jsonrpc body)))
-                 (mcp-server-lib-http--log "Response: %s" response)
-                 (if response
-                     (mcp-server-lib-http--send-response proc response)
-                   ;; Notification - no response needed
-                   (with-temp-buffer
-                     (httpd-send-header proc "text/plain" 204))))
-             (json-error
-              (mcp-server-lib-http--send-error
-               proc 400 (format "Invalid JSON: %s" (error-message-string err))))
-             (error
-              (mcp-server-lib-http--send-error
-               proc 500 (format "Internal error: %s" (error-message-string err)))))))))
+        (let ((sid session-id))
+          (run-at-time
+           0 nil
+           (lambda ()
+             (let ((mcp-server-lib--request-session-id sid))
+               (condition-case err
+                   (let ((response (mcp-server-lib-process-jsonrpc body)))
+                     (mcp-server-lib-http--log "Response: %s" response)
+                     (if response
+                         (mcp-server-lib-http--send-response proc response)
+                       ;; Notification - no response needed
+                       (with-temp-buffer
+                         (httpd-send-header proc "text/plain" 204))))
+                 (json-error
+                  (mcp-server-lib-http--send-error
+                   proc 400 (format "Invalid JSON: %s" (error-message-string err))))
+                 (error
+                  (mcp-server-lib-http--send-error
+                   proc 500 (format "Internal error: %s" (error-message-string err)))))))))))
 
      ;; Reject other methods
      (t
       (mcp-server-lib-http--send-error
        proc 405 "Method not allowed")))))
+
+(defun httpd/mcp/v1/messages (proc _uri-path _uri-query request)
+  "Handle POST requests to /mcp/v1/messages endpoint.
+PROC is the process, REQUEST is headers."
+  (mcp-server-lib-http--log "Received request to /mcp/v1/messages")
+  (mcp-server-lib-http--handle-jsonrpc-request proc request))
+
+(defun httpd/mcp/v1/sessions (proc uri-path _uri-query request)
+  "Handle MCP requests with session routing.
+Matches /mcp/v1/sessions/{session-id}/messages.
+Extracts the session-id from URI-PATH and binds it as
+`mcp-server-lib--request-session-id' during processing."
+  (let* ((parts (split-string uri-path "/"))
+         (session-id (nth 4 parts)))
+    (mcp-server-lib-http--log "Session MCP request for session: %s" session-id)
+    (mcp-server-lib-http--handle-jsonrpc-request proc request session-id)))
 
 ;;; Public API
 ;;;###autoload
@@ -190,7 +208,7 @@ Example:
   (httpd-start)
 
   (message "MCP HTTP server started on http://%s:%d" host port)
-  (message "Endpoint: POST http://%s:%d/mcp/v1/messages" host port))
+  (message "Endpoints: POST /mcp/v1/messages, POST /mcp/v1/sessions/{id}/messages" host port))
 
 ;;;###autoload
 (defun mcp-server-lib-http-stop ()

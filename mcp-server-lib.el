@@ -152,6 +152,26 @@ many seconds for the async callback to complete before returning a timeout error
   :type 'number
   :group 'mcp-server-lib)
 
+(defcustom mcp-server-lib-default-directory-function nil
+  "Function to determine `default-directory' for tool calls.
+When non-nil, called with one argument SESSION-ID (a string or nil)
+before each tool execution.  SESSION-ID is the value of
+`mcp-server-lib--request-session-id' bound by the transport layer.
+Should return a directory path string or nil.  When it returns a
+non-nil value, that value is used as `default-directory' for the
+tool handler.  When nil or when this variable is nil, falls back
+to `++workspace-current-project-root' or the current
+`default-directory'."
+  :type '(choice (const :tag "Default behavior" nil)
+          (function :tag "Custom function"))
+  :group 'mcp-server-lib)
+
+(defvar mcp-server-lib--request-session-id nil
+  "Dynamic variable holding the session ID for the current MCP request.
+Transport layers (e.g. HTTP) should bind this so that
+`mcp-server-lib-default-directory-function' can use it to resolve
+per-session working directories.")
+
 ;;; Public Constants
 
 (defconst mcp-server-lib-name "emacs-mcp-server-lib"
@@ -875,9 +895,14 @@ Returns a list of all registered resource templates."
   (let* ((is-async (plist-get tool :async))
          (handler (plist-get tool :handler))
          (default-directory
-          (if (fboundp '++workspace-current-project-root)
-              (++workspace-current-project-root)
-            default-directory)))
+          (or (and mcp-server-lib-default-directory-function
+                   (condition-case nil
+                       (funcall mcp-server-lib-default-directory-function
+                                mcp-server-lib--request-session-id)
+                     (wrong-number-of-arguments
+                      ;; Backward compat: call with no args if fn doesn't accept session-id
+                      (funcall mcp-server-lib-default-directory-function))))
+              default-directory)))
     (if is-async
         ;; Async handler: use promise-like pattern with polling
         (let ((result-cell (list nil))  ; mutable cell for result
