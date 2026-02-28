@@ -127,8 +127,15 @@ PROC is the process, REQUEST is headers."
       (if (string-empty-p body)
           (mcp-server-lib-http--send-error
            proc 400 "Empty request body")
-        ;; Process request in a separate thread to avoid blocking main UI
-        (make-thread
+        ;; Schedule processing on the main thread via timer.
+        ;; IMPORTANT: We must NOT use make-thread here because async
+        ;; tools (e.g. ask_user_question) use `recursive-edit' to read
+        ;; keyboard input, and keyboard reading only works on the main
+        ;; thread.  `run-at-time 0' defers to the next event-loop
+        ;; iteration, keeping the httpd process filter responsive while
+        ;; allowing `recursive-edit' to work correctly.
+        (run-at-time
+         0 nil
          (lambda ()
            (condition-case err
                (let ((response (mcp-server-lib-process-jsonrpc body)))
@@ -143,8 +150,7 @@ PROC is the process, REQUEST is headers."
                proc 400 (format "Invalid JSON: %s" (error-message-string err))))
              (error
               (mcp-server-lib-http--send-error
-               proc 500 (format "Internal error: %s" (error-message-string err))))))
-         "mcp-http-handler")))
+               proc 500 (format "Internal error: %s" (error-message-string err)))))))))
 
      ;; Reject other methods
      (t
