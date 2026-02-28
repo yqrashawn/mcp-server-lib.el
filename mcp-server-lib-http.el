@@ -30,9 +30,10 @@
 ;;   (mcp-server-lib-http-start :port 9000)  ; Custom port
 ;;   (mcp-server-lib-http-stop)   ; Stop server
 ;;
-;; The server exposes two endpoints:
+;; The server exposes three endpoints:
 ;;   POST /mcp/v1/messages - Process JSON-RPC requests
 ;;   POST /mcp/v1/sessions/{id}/messages - Session-scoped JSON-RPC requests
+;;   POST /mcp/v1/cwd/{path}/messages - JSON-RPC requests with working directory
 ;;
 ;; Example with curl:
 ;;   curl -X POST http://localhost:8080/mcp/v1/messages \
@@ -104,10 +105,13 @@
 
 ;;; Request handlers
 
-(defun mcp-server-lib-http--handle-jsonrpc-request (proc request &optional session-id)
+(defun mcp-server-lib-http--handle-jsonrpc-request (proc request &optional session-id cwd)
   "Handle a JSON-RPC HTTP request from PROC with REQUEST headers.
 If SESSION-ID is non-nil, bind `mcp-server-lib--request-session-id'
-during processing so that tool handlers can resolve per-session state."
+during processing so that tool handlers can resolve per-session state.
+If CWD is non-nil, bind `mcp-server-lib--request-cwd' to it so that
+`mcp-server-lib-default-directory-function' can use it, or if no
+custom function is set, it is used directly as `default-directory'."
   (let* ((method (caar request))
          (content (cadr (assoc "Content" request)))
          (body (or content "")))
@@ -134,11 +138,13 @@ during processing so that tool handlers can resolve per-session state."
         ;; thread.  `run-at-time 0' defers to the next event-loop
         ;; iteration, keeping the httpd process filter responsive while
         ;; allowing `recursive-edit' to work correctly.
-        (let ((sid session-id))
+        (let ((sid session-id)
+              (dir cwd))
           (run-at-time
            0 nil
            (lambda ()
-             (let ((mcp-server-lib--request-session-id sid))
+             (let ((mcp-server-lib--request-session-id sid)
+                   (mcp-server-lib--request-cwd dir))
                (condition-case err
                    (let ((response (mcp-server-lib-process-jsonrpc body)))
                      (mcp-server-lib-http--log "Response: %s" response)
@@ -175,6 +181,27 @@ Extracts the session-id from URI-PATH and binds it as
     (mcp-server-lib-http--log "Session MCP request for session: %s" session-id)
     (mcp-server-lib-http--handle-jsonrpc-request proc request session-id)))
 
+(defun httpd/mcp/v1/cwd (proc uri-path _uri-query request)
+  "Handle MCP requests with working directory routing.
+Matches /mcp/v1/cwd/{path}/messages.
+Extracts the directory path from URI-PATH and binds `default-directory'
+to it during tool execution.
+
+The path between /cwd/ and the trailing /messages is taken as the
+working directory (with a leading / prepended by the URL structure).
+For example, /mcp/v1/cwd/Users/foo/project/messages sets
+`default-directory' to /Users/foo/project."
+  (let* ((prefix "/mcp/v1/cwd")
+         (suffix "/messages")
+         (rest (substring uri-path (length prefix)))
+         (cwd (if (string-suffix-p suffix rest)
+                  (substring rest 0 (- (length rest) (length suffix)))
+                rest))
+         (cwd (if (string-empty-p cwd) nil
+                (file-name-as-directory cwd))))
+    (mcp-server-lib-http--log "CWD MCP request for directory: %s" cwd)
+    (mcp-server-lib-http--handle-jsonrpc-request proc request nil cwd)))
+
 ;;; Public API
 ;;;###autoload
 (cl-defun mcp-server-lib-http-start (&key (host mcp-server-lib-http-host)
@@ -208,7 +235,7 @@ Example:
   (httpd-start)
 
   (message "MCP HTTP server started on http://%s:%d" host port)
-  (message "Endpoints: POST /mcp/v1/messages, POST /mcp/v1/sessions/{id}/messages" host port))
+  (message "Endpoints: POST /mcp/v1/messages, POST /mcp/v1/sessions/{id}/messages, POST /mcp/v1/cwd/{path}/messages"))
 
 ;;;###autoload
 (defun mcp-server-lib-http-stop ()

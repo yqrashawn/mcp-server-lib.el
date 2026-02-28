@@ -157,10 +157,13 @@ many seconds for the async callback to complete before returning a timeout error
 When non-nil, called with one argument SESSION-ID (a string or nil)
 before each tool execution.  SESSION-ID is the value of
 `mcp-server-lib--request-session-id' bound by the transport layer.
+The function can also access `mcp-server-lib--request-cwd' to get
+the working directory requested by the client (e.g. via the HTTP
+/cwd/ endpoint).
 Should return a directory path string or nil.  When it returns a
 non-nil value, that value is used as `default-directory' for the
 tool handler.  When nil or when this variable is nil, falls back
-to `++workspace-current-project-root' or the current
+to `mcp-server-lib--request-cwd' if set, then to the current
 `default-directory'."
   :type '(choice (const :tag "Default behavior" nil)
           (function :tag "Custom function"))
@@ -171,6 +174,14 @@ to `++workspace-current-project-root' or the current
 Transport layers (e.g. HTTP) should bind this so that
 `mcp-server-lib-default-directory-function' can use it to resolve
 per-session working directories.")
+
+(defvar mcp-server-lib--request-cwd nil
+  "Dynamic variable holding the working directory for the current MCP request.
+Transport layers (e.g. the HTTP /cwd/ endpoint) should bind this so that
+tool handlers run in the requested directory.  When
+`mcp-server-lib-default-directory-function' is set, it can read this
+variable to decide the final `default-directory'.  When no custom
+function is set, this value is used directly as `default-directory'.")
 
 ;;; Public Constants
 
@@ -902,6 +913,7 @@ Returns a list of all registered resource templates."
                      (wrong-number-of-arguments
                       ;; Backward compat: call with no args if fn doesn't accept session-id
                       (funcall mcp-server-lib-default-directory-function))))
+              mcp-server-lib--request-cwd
               default-directory)))
     (if is-async
         ;; Async handler: use promise-like pattern with polling
@@ -1008,8 +1020,6 @@ METHOD-METRICS is used to track errors for this method."
          (tool (gethash tool-name mcp-server-lib--tools))
          (tool-args (alist-get 'arguments params))
          (tool-args-vals (mcp-server-lib--parse-tool-args tool-args)))
-    ;; (setq aaa tool-args)
-    ;; (mcp-server-lib--parse-tool-args aaa)
     (if tool
         (condition-case err
             (mcp-server-lib--handle-tools-call-apply
