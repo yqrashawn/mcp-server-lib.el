@@ -223,6 +223,15 @@ tool handlers run in the requested directory.  When
 variable to decide the final `default-directory'.  When no custom
 function is set, this value is used directly as `default-directory'.")
 
+(defvar mcp-server-lib--async-response-fn nil
+  "When non-nil, async tool results are delivered via this function.
+Transport layers (e.g. HTTP) bind this to a function that accepts a
+JSON-RPC response string.  When bound, async tool handlers deliver
+their results through this callback instead of blocking in a polling
+loop, preventing nested `accept-process-output' from blocking
+`recursive-edit' keyboard input when multiple agents call async
+tools concurrently.")
+
 ;;; Public Constants
 
 (defconst mcp-server-lib-name "emacs-mcp-server-lib"
@@ -957,54 +966,87 @@ Returns a list of all registered resource templates."
               default-directory))
          (mcp-server-lib--request-cwd default-directory))
     (if is-async
-        ;; Async handler: use promise-like pattern with polling
-        (let ((result-cell (list nil))  ; mutable cell for result
-              (done-cell (list nil))    ; mutable cell for completion flag
-              (error-cell (list nil)))  ; mutable cell for error
-          ;; Start async operation with callback
-          (condition-case err
-              (apply handler
-                     (lambda (result)
-                       ;; Callback stores result and marks as done
-                       (setcar result-cell result)
-                       (setcar done-cell t))
-                     args-vals)
-            (error
-             ;; Capture errors during handler invocation
-             (setcar error-cell err)
-             (setcar done-cell t)))
-          
-          ;; Poll until done or timeout with proper event processing
-          (let ((timeout mcp-server-lib-async-timeout)
-                (elapsed 0)
-                (poll-interval 0.1))  ; 100ms polling interval
-            (while (and (not (car done-cell))
-                        (< elapsed timeout))
-              ;; CRITICAL: Process async events to allow callbacks to execute
-              ;; Use accept-process-output with no specific process to handle all pending output
-              (accept-process-output nil poll-interval nil t)
-              (setq elapsed (+ elapsed poll-interval)))
-            
-            ;; Check results
-            (cond
-             ;; Error during handler invocation
-             ((car error-cell)
-              (mcp-server-lib--jsonrpc-error
-               id
-               mcp-server-lib-jsonrpc-error-internal
-               (format "Error starting async operation: %s"
-                       (error-message-string (car error-cell)))))
-             ;; Timeout
-             ((not (car done-cell))
-              (cl-incf (mcp-server-lib-metrics-errors method-metrics))
-              (mcp-server-lib--jsonrpc-error
-               id
-               mcp-server-lib-jsonrpc-error-internal
-               (format "Async operation timeout (%ds)" mcp-server-lib-async-timeout)))
-             ;; Success - handle result
-             (t
-              (mcp-server-lib--handle-tools-call-handle-result
-               id args-vals tool (car result-cell) method-metrics)))))
+        (if mcp-server-lib--async-response-fn
+            ;; Non-blocking async: deliver result via callback, don't poll.
+            ;; This prevents nested accept-process-output loops from blocking
+            ;; recursive-edit keyboard input when multiple agents call async
+            ;; tools concurrently (e.g. ask_user_question).
+            (let ((response-fn mcp-server-lib--async-response-fn)
+                  (tool-id id)
+                  (tool-args args-vals)
+                  (tool-ref tool)
+                  (metrics method-metrics))
+              (condition-case err
+                  (apply handler
+                         (lambda (result)
+                           (condition-case err2
+                               (funcall response-fn
+                                        (mcp-server-lib--handle-tools-call-handle-result
+                                         tool-id tool-args tool-ref result metrics))
+                             (error
+                              (funcall response-fn
+                                       (mcp-server-lib--jsonrpc-error
+                                        tool-id
+                                        mcp-server-lib-jsonrpc-error-internal
+                                        (format "Error handling async result: %s"
+                                                (error-message-string err2)))))))
+                         args-vals)
+                (error
+                 (funcall response-fn
+                          (mcp-server-lib--jsonrpc-error
+                           tool-id
+                           mcp-server-lib-jsonrpc-error-internal
+                           (format "Error starting async operation: %s"
+                                   (error-message-string err))))))
+              :async-pending)
+          ;; Blocking async: poll until done (stdio transport)
+          (let ((result-cell (list nil))  ; mutable cell for result
+                (done-cell (list nil))    ; mutable cell for completion flag
+                (error-cell (list nil)))  ; mutable cell for error
+            ;; Start async operation with callback
+            (condition-case err
+                (apply handler
+                       (lambda (result)
+                         ;; Callback stores result and marks as done
+                         (setcar result-cell result)
+                         (setcar done-cell t))
+                       args-vals)
+              (error
+               ;; Capture errors during handler invocation
+               (setcar error-cell err)
+               (setcar done-cell t)))
+
+            ;; Poll until done or timeout with proper event processing
+            (let ((timeout mcp-server-lib-async-timeout)
+                  (elapsed 0)
+                  (poll-interval 0.1))  ; 100ms polling interval
+              (while (and (not (car done-cell))
+                          (< elapsed timeout))
+                ;; CRITICAL: Process async events to allow callbacks to execute
+                ;; Use accept-process-output with no specific process to handle all pending output
+                (accept-process-output nil poll-interval nil t)
+                (setq elapsed (+ elapsed poll-interval)))
+
+              ;; Check results
+              (cond
+               ;; Error during handler invocation
+               ((car error-cell)
+                (mcp-server-lib--jsonrpc-error
+                 id
+                 mcp-server-lib-jsonrpc-error-internal
+                 (format "Error starting async operation: %s"
+                         (error-message-string (car error-cell)))))
+               ;; Timeout
+               ((not (car done-cell))
+                (cl-incf (mcp-server-lib-metrics-errors method-metrics))
+                (mcp-server-lib--jsonrpc-error
+                 id
+                 mcp-server-lib-jsonrpc-error-internal
+                 (format "Async operation timeout (%ds)" mcp-server-lib-async-timeout)))
+               ;; Success - handle result
+               (t
+                (mcp-server-lib--handle-tools-call-handle-result
+                 id args-vals tool (car result-cell) method-metrics))))))
       ;; Sync handler: call directly and handle result
       (mcp-server-lib--handle-tools-call-handle-result
        id
@@ -1189,8 +1231,9 @@ See also: `mcp-server-lib-process-jsonrpc-parsed'"
         (error
          (setq response (mcp-server-lib--handle-error err)))))
 
-    ;; Only log and return responses when they exist (not for notifications)
-    (when response
+    ;; Only log and return responses when they exist (not for notifications
+    ;; or async-pending sentinels)
+    (when (and response (not (eq response :async-pending)))
       (mcp-server-lib--log-json-rpc "out" response))
     response))
 

@@ -143,22 +143,98 @@ custom function is set, it is used directly as `default-directory'."
           (run-at-time
            0 nil
            (lambda ()
-             (let ((mcp-server-lib--request-session-id sid)
-                   (mcp-server-lib--request-cwd dir))
+             (let* ((mcp-server-lib--request-session-id sid)
+                    (mcp-server-lib--request-cwd dir)
+                    ;; Shared mutable state for chunked transfer encoding.
+                    ;; When an async tool is queued, we switch to chunked
+                    ;; mode to keep the HTTP connection alive (the client
+                    ;; closes idle connections when multiple are open).
+                    (response-sent nil)
+                    (chunked-mode nil)
+                    (keepalive-timer nil)
+                    ;; Bind async response callback so async tools (e.g.
+                    ;; ask_user_question) deliver their result via this
+                    ;; callback instead of blocking in a polling loop.
+                    ;; This prevents nested accept-process-output from
+                    ;; blocking recursive-edit keyboard input when
+                    ;; multiple agents call async tools concurrently.
+                    (mcp-server-lib--async-response-fn
+                     (lambda (response)
+                       (mcp-server-lib-http--log "Async response: %s" response)
+                       (setq response-sent t)
+                       (when keepalive-timer
+                         (cancel-timer keepalive-timer)
+                         (setq keepalive-timer nil))
+                       (if (not (process-live-p proc))
+                           (message "[MCP HTTP] Cannot send async response: connection dead (status: %s)"
+                                    (process-status proc))
+                         (condition-case err
+                             (if chunked-mode
+                                 ;; Chunked mode: send JSON as final chunk
+                                 (if response
+                                     (let ((len (string-bytes response)))
+                                       (process-send-string
+                                        proc (format "%x\r\n%s\r\n0\r\n\r\n" len response)))
+                                   (process-send-string proc "0\r\n\r\n"))
+                               ;; Normal mode: send regular HTTP response
+                               (if response
+                                   (mcp-server-lib-http--send-response proc response)
+                                 (with-temp-buffer
+                                   (httpd-send-header proc "text/plain" 204))))
+                           (error
+                            (message "[MCP HTTP] Error sending async response: %s"
+                                     (error-message-string err))))))))
                (condition-case err
                    (let ((response (mcp-server-lib-process-jsonrpc body)))
-                     (mcp-server-lib-http--log "Response: %s" response)
-                     (if response
-                         (mcp-server-lib-http--send-response proc response)
-                       ;; Notification - no response needed
-                       (with-temp-buffer
-                         (httpd-send-header proc "text/plain" 204))))
+                     (cond
+                      ;; Async tool - response will be sent by callback
+                      ((eq response :async-pending)
+                       (unless response-sent
+                         ;; Queued async: callback hasn't fired yet.
+                         ;; Switch to chunked transfer encoding to keep
+                         ;; connection alive while user answers questions.
+                         (setq chunked-mode t)
+                         (condition-case err2
+                             (progn
+                               (process-send-string
+                                proc
+                                (concat
+                                 "HTTP/1.1 200 OK\r\n"
+                                 "Content-Type: application/json\r\n"
+                                 "Transfer-Encoding: chunked\r\n"
+                                 "Connection: keep-alive\r\n"
+                                 "Access-Control-Allow-Origin: *\r\n"
+                                 "\r\n"))
+                               (setq keepalive-timer
+                                     (run-at-time
+                                      15 15
+                                      (lambda ()
+                                        (when (process-live-p proc)
+                                          (ignore-errors
+                                            (process-send-string
+                                             proc "1\r\n \r\n")))))))
+                           (error
+                            (message "[MCP HTTP] Error starting chunked stream: %s"
+                                     (error-message-string err2))))))
+                      ;; Normal response
+                      (response
+                       (unless response-sent
+                         (mcp-server-lib-http--log "Response: %s" response)
+                         (mcp-server-lib-http--send-response proc response)))
+                      ;; Notification - no response needed
+                      (t
+                       (unless response-sent
+                         (with-temp-buffer
+                           (httpd-send-header proc "text/plain" 204))))))
                  (json-error
-                  (mcp-server-lib-http--send-error
-                   proc 400 (format "Invalid JSON: %s" (error-message-string err))))
+                  (unless response-sent
+                    (mcp-server-lib-http--send-error
+                     proc 400 (format "Invalid JSON: %s" (error-message-string err)))))
                  (error
-                  (mcp-server-lib-http--send-error
-                   proc 500 (format "Internal error: %s" (error-message-string err)))))))))))
+                  (unless response-sent
+                    (mcp-server-lib-http--send-error
+                     proc 500 (format "Internal error: %s" (error-message-string err))))))))))))
+
 
      ;; Reject other methods
      (t
