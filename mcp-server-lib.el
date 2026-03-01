@@ -56,20 +56,60 @@
 
 (defvar mcp-server-lib-logger (lgr-get-logger "mcp-server-lib"))
 
-(defcustom mcp-server-lib-log-file
-  (expand-file-name "~/Dropbox/sync/gptelt.log")
-  "File path for MCP server tool call logging.
+(defcustom mcp-server-lib-log-directory
+  (expand-file-name "~/Dropbox/sync/")
+  "Directory for MCP server tool call log files.
+Log files are named with hostname and hourly timestamps to avoid
+Dropbox sync conflicts and keep individual files small.
 Set to nil to disable file logging."
   :type '(choice (const :tag "No logging" nil)
-          (file :tag "Log file path"))
+          (directory :tag "Log directory"))
   :group 'mcp-server-lib)
 
-(when mcp-server-lib-log-file
+(defcustom mcp-server-lib-log-base-name "gptelt"
+  "Base name for MCP server log files.
+Files are named BASE-HOSTNAME-YYYY-MM-DD-HH.log."
+  :type 'string
+  :group 'mcp-server-lib)
+
+(defclass mcp-server-lib--rotating-file-appender (lgr-appender)
+  ((directory
+    :type string
+    :initarg :directory
+    :documentation "Directory for log files.")
+   (base-name
+    :type string
+    :initarg :base-name
+    :documentation "Base name for log files."))
+  "Log events to hourly-rotated files with hostname in the name.")
+
+(cl-defmethod lgr-to-string ((this mcp-server-lib--rotating-file-appender))
+  "Format THIS appender as string."
+  (format "RotatingFile %s/%s-*.log" (oref this directory) (oref this base-name)))
+
+(cl-defmethod lgr-append
+    ((this mcp-server-lib--rotating-file-appender) (event lgr-event))
+  "Append EVENT to an hourly-rotated log file.
+THIS is a rotating file appender."
+  (let* ((hostname (car (split-string (system-name) "\\.")))
+         (time-str (format-time-string "%Y-%m-%d-%H"))
+         (filename (expand-file-name
+                    (format "%s-%s-%s.log"
+                            (oref this base-name) hostname time-str)
+                    (oref this directory)))
+         (msg (lgr-format-event (oref this layout) event)))
+    (with-temp-buffer
+      (insert msg "\n")
+      (append-to-file (point-min) (point-max) filename)))
+  this)
+
+(when mcp-server-lib-log-directory
   (lgr-reset-appenders mcp-server-lib-logger)
   (-> mcp-server-lib-logger
       (lgr-add-appender
-       (-> (lgr-appender-file
-            :file (file-truename mcp-server-lib-log-file))
+       (-> (mcp-server-lib--rotating-file-appender
+            :directory (file-truename mcp-server-lib-log-directory)
+            :base-name mcp-server-lib-log-base-name)
            (lgr-set-layout
             (lgr-layout-format
              :format "** [%t] :%L: %m %j\n#+end_src"
@@ -904,17 +944,18 @@ Returns a list of all registered resource templates."
 (defun mcp-server-lib--handle-tools-call-apply
     (id tool args-vals method-metrics)
   (let* ((is-async (plist-get tool :async))
-         (handler (plist-get tool :handler))
-         (default-directory
-          (or (and mcp-server-lib-default-directory-function
-                   (condition-case nil
-                       (funcall mcp-server-lib-default-directory-function
-                                mcp-server-lib--request-session-id)
-                     (wrong-number-of-arguments
+          (handler (plist-get tool :handler))
+          (default-directory
+            (or (and mcp-server-lib-default-directory-function
+                  (condition-case nil
+                    (funcall mcp-server-lib-default-directory-function
+                      mcp-server-lib--request-session-id)
+                    (wrong-number-of-arguments
                       ;; Backward compat: call with no args if fn doesn't accept session-id
                       (funcall mcp-server-lib-default-directory-function))))
               mcp-server-lib--request-cwd
-              default-directory)))
+              default-directory))
+          (mcp-server-lib--request-cwd default-directory))
     (if is-async
         ;; Async handler: use promise-like pattern with polling
         (let ((result-cell (list nil))  ; mutable cell for result
