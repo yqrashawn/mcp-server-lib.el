@@ -57,7 +57,7 @@
 (defvar mcp-server-lib-logger (lgr-get-logger "mcp-server-lib"))
 
 (defcustom mcp-server-lib-log-directory
-  (expand-file-name "~/Dropbox/sync/")
+  (expand-file-name "~/Dropbox/sync/gptelt")
   "Directory for MCP server tool call log files.
 Log files are named with hostname and hourly timestamps to avoid
 Dropbox sync conflicts and keep individual files small.
@@ -88,7 +88,7 @@ Files are named BASE-HOSTNAME-YYYY-MM-DD-HH.log."
   (format "RotatingFile %s/%s-*.log" (oref this directory) (oref this base-name)))
 
 (cl-defmethod lgr-append
-    ((this mcp-server-lib--rotating-file-appender) (event lgr-event))
+  ((this mcp-server-lib--rotating-file-appender) (event lgr-event))
   "Append EVENT to an hourly-rotated log file.
 THIS is a rotating file appender."
   (let* ((hostname (car (split-string (system-name) "\\.")))
@@ -944,18 +944,18 @@ Returns a list of all registered resource templates."
 (defun mcp-server-lib--handle-tools-call-apply
     (id tool args-vals method-metrics)
   (let* ((is-async (plist-get tool :async))
-          (handler (plist-get tool :handler))
-          (default-directory
-            (or (and mcp-server-lib-default-directory-function
-                  (condition-case nil
-                    (funcall mcp-server-lib-default-directory-function
-                      mcp-server-lib--request-session-id)
-                    (wrong-number-of-arguments
+         (handler (plist-get tool :handler))
+         (default-directory
+          (or (and mcp-server-lib-default-directory-function
+                   (condition-case nil
+                       (funcall mcp-server-lib-default-directory-function
+                                mcp-server-lib--request-session-id)
+                     (wrong-number-of-arguments
                       ;; Backward compat: call with no args if fn doesn't accept session-id
                       (funcall mcp-server-lib-default-directory-function))))
               mcp-server-lib--request-cwd
               default-directory))
-          (mcp-server-lib--request-cwd default-directory))
+         (mcp-server-lib--request-cwd default-directory))
     (if is-async
         ;; Async handler: use promise-like pattern with polling
         (let ((result-cell (list nil))  ; mutable cell for result
