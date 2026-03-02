@@ -180,7 +180,7 @@ custom function is set, it is used directly as `default-directory'."
                                (if response
                                    (mcp-server-lib-http--send-response proc response)
                                  (with-temp-buffer
-                                   (httpd-send-header proc "text/plain" 204))))
+                                   (httpd-send-header proc "text/plain" 202))))
                            (error
                             (message "[MCP HTTP] Error sending async response: %s"
                                      (error-message-string err))))))))
@@ -225,7 +225,7 @@ custom function is set, it is used directly as `default-directory'."
                       (t
                        (unless response-sent
                          (with-temp-buffer
-                           (httpd-send-header proc "text/plain" 204))))))
+                           (httpd-send-header proc "text/plain" 202))))))
                  (json-error
                   (unless response-sent
                     (mcp-server-lib-http--send-error
