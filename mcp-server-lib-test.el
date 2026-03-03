@@ -2550,6 +2550,159 @@ from a function loaded from bytecode rather than interpreted elisp."
         "Error reading resource test://123: Wrong number of arguments: ((t) nil \"Generic handler to return a test string.\" \"test result\"), 1"
       "Error reading resource test://123: Wrong number of arguments: #[nil (\"test result\") (t) nil \"Generic handler to return a test string.\"], 1"))))
 
+;;; Tests for argument reordering (optional parameter skipping bug fix)
+
+(defun mcp-server-lib-test--handler-with-optional-args
+    (file-path old-string new-string &optional replace-all instruction)
+  "Test handler mimicking edit_file with optional args.
+FILE-PATH, OLD-STRING, NEW-STRING are required.
+REPLACE-ALL and INSTRUCTION are optional."
+  (list :file-path file-path
+        :old-string old-string
+        :new-string new-string
+        :replace-all replace-all
+        :instruction instruction))
+
+;; Unit tests for mcp-server-lib--reorder-args-by-schema
+
+(ert-deftest mcp-server-lib-test-reorder-args-all-present ()
+  "Test reordering when all args are present in JSON order matching schema."
+  (let* ((args-spec '((:name "a" :type string)
+                      (:name "b" :type string)
+                      (:name "c" :type string)))
+         (tool-args '((a . "val-a") (b . "val-b") (c . "val-c")))
+         (result (mcp-server-lib--reorder-args-by-schema tool-args args-spec)))
+    (should (equal '("val-a" "val-b" "val-c") result))))
+
+(ert-deftest mcp-server-lib-test-reorder-args-different-json-order ()
+  "Test reordering when JSON keys arrive in different order than schema."
+  (let* ((args-spec '((:name "a" :type string)
+                      (:name "b" :type string)
+                      (:name "c" :type string)))
+         (tool-args '((c . "val-c") (a . "val-a") (b . "val-b")))
+         (result (mcp-server-lib--reorder-args-by-schema tool-args args-spec)))
+    (should (equal '("val-a" "val-b" "val-c") result))))
+
+(ert-deftest mcp-server-lib-test-reorder-args-missing-optional ()
+  "Test that missing optional args get nil in the correct position."
+  (let* ((args-spec '((:name "file_path" :type string)
+                      (:name "old_string" :type string)
+                      (:name "new_string" :type string)
+                      (:name "replace_all" :type boolean :optional t)
+                      (:name "instruction" :type string :optional t)))
+         ;; Simulate: file_path, old_string, new_string, instruction (skip replace_all)
+         (tool-args '((file_path . "/path/to/file")
+                      (old_string . "old")
+                      (new_string . "new")
+                      (instruction . "fix something")))
+         (result (mcp-server-lib--reorder-args-by-schema tool-args args-spec)))
+    (should (equal '("/path/to/file" "old" "new" nil "fix something") result))))
+
+(ert-deftest mcp-server-lib-test-reorder-args-no-optional-provided ()
+  "Test that all optional args are nil when none are provided."
+  (let* ((args-spec '((:name "required1" :type string)
+                      (:name "optional1" :type string :optional t)
+                      (:name "optional2" :type string :optional t)))
+         (tool-args '((required1 . "value")))
+         (result (mcp-server-lib--reorder-args-by-schema tool-args args-spec)))
+    (should (equal '("value" nil nil) result))))
+
+(ert-deftest mcp-server-lib-test-reorder-args-json-false ()
+  "Test that :json-false is converted to nil."
+  (let* ((args-spec '((:name "path" :type string)
+                      (:name "flag" :type boolean :optional t)))
+         (tool-args '((path . "/file") (flag . :json-false)))
+         (result (mcp-server-lib--reorder-args-by-schema tool-args args-spec)))
+    (should (equal '("/file" nil) result))))
+
+(ert-deftest mcp-server-lib-test-reorder-args-empty-args ()
+  "Test with no args spec returns empty list."
+  (let* ((args-spec nil)
+         (tool-args nil)
+         (result (mcp-server-lib--reorder-args-by-schema tool-args args-spec)))
+    (should (equal nil result))))
+
+;; End-to-end test: the actual bug scenario
+
+(ert-deftest mcp-server-lib-test-tools-call-skipped-optional-arg ()
+  "Test that skipping an optional arg doesn't misalign subsequent args.
+This is the actual bug: when replace_all is omitted but instruction is provided,
+the instruction value was being passed in the replace_all position."
+  (mcp-server-lib-test--with-tools
+      ((#'mcp-server-lib-test--handler-with-optional-args
+        :id "edit-test"
+        :description "Test tool with optional args"
+        :args (list '(:name "file_path" :type string
+                      :description "File path")
+                    '(:name "old_string" :type string
+                      :description "Old text")
+                    '(:name "new_string" :type string
+                      :description "New text")
+                    '(:name "replace_all" :type boolean
+                      :description "Replace all" :optional t)
+                    '(:name "instruction" :type string
+                      :description "Instruction" :optional t))))
+    ;; Call with instruction but WITHOUT replace_all
+    (let* ((args '((file_path . "/test/file.txt")
+                   (old_string . "old text")
+                   (new_string . "new text")
+                   (instruction . "fix the function")))
+           (result (mcp-server-lib-ert-call-tool "edit-test" args)))
+      ;; The result should be a printed plist representation
+      ;; instruction should NOT land in replace_all position
+      (should (string-match-p "replace-all nil" result))
+      (should (string-match-p "instruction fix the function" result)))))
+
+(ert-deftest mcp-server-lib-test-tools-call-all-optional-args-provided ()
+  "Test that providing all optional args still works correctly."
+  (mcp-server-lib-test--with-tools
+      ((#'mcp-server-lib-test--handler-with-optional-args
+        :id "edit-test"
+        :description "Test tool with optional args"
+        :args (list '(:name "file_path" :type string
+                      :description "File path")
+                    '(:name "old_string" :type string
+                      :description "Old text")
+                    '(:name "new_string" :type string
+                      :description "New text")
+                    '(:name "replace_all" :type boolean
+                      :description "Replace all" :optional t)
+                    '(:name "instruction" :type string
+                      :description "Instruction" :optional t))))
+    ;; Call with ALL args including replace_all
+    (let* ((args '((file_path . "/test/file.txt")
+                   (old_string . "old text")
+                   (new_string . "new text")
+                   (replace_all . t)
+                   (instruction . "fix the function")))
+           (result (mcp-server-lib-ert-call-tool "edit-test" args)))
+      (should (string-match-p "replace-all t" result))
+      (should (string-match-p "instruction fix the function" result)))))
+
+(ert-deftest mcp-server-lib-test-tools-call-no-optional-args ()
+  "Test that providing no optional args works correctly."
+  (mcp-server-lib-test--with-tools
+      ((#'mcp-server-lib-test--handler-with-optional-args
+        :id "edit-test"
+        :description "Test tool with optional args"
+        :args (list '(:name "file_path" :type string
+                      :description "File path")
+                    '(:name "old_string" :type string
+                      :description "Old text")
+                    '(:name "new_string" :type string
+                      :description "New text")
+                    '(:name "replace_all" :type boolean
+                      :description "Replace all" :optional t)
+                    '(:name "instruction" :type string
+                      :description "Instruction" :optional t))))
+    ;; Call with only required args
+    (let* ((args '((file_path . "/test/file.txt")
+                   (old_string . "old text")
+                   (new_string . "new text")))
+           (result (mcp-server-lib-ert-call-tool "edit-test" args)))
+      (should (string-match-p "replace-all nil" result))
+      (should (string-match-p "instruction nil" result)))))
+
 (provide 'mcp-server-lib-test)
 
 ;; Local Variables:

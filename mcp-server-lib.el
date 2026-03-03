@@ -1096,13 +1096,38 @@ Handles nested vectors (JSON arrays) and converts alists to plists with keywords
          v))
      arg-vals)))
 
+(defun mcp-server-lib--reorder-args-by-schema (tool-args args-spec)
+  "Reorder TOOL-ARGS alist values to match the positional order in ARGS-SPEC.
+TOOL-ARGS is an alist of (name . value) from JSON arguments.
+ARGS-SPEC is the tool's :args list of plists with :name keys.
+Returns a list of values in the order defined by ARGS-SPEC,
+inserting nil for any missing optional parameters.
+Each value is parsed and vectors are converted to lists of plists."
+  (mapcar
+   (lambda (arg-spec)
+     (let* ((name (plist-get arg-spec :name))
+            (key (intern name))
+            (pair (assq key tool-args)))
+       (if pair
+           (let ((v (mcp-server-lib--parse-tool-arg pair)))
+             (if (vectorp v)
+                 (mapcar
+                  (lambda (vv) (mcp-server-lib--parse-tool-arg-vector vv t))
+                  v)
+               v))
+         nil)))
+   args-spec))
+
 (defun mcp-server-lib--handle-tools-call (id params method-metrics)
   "Handle tools/call request with ID and PARAMS.
 METHOD-METRICS is used to track errors for this method."
   (let* ((tool-name (alist-get 'name params))
          (tool (gethash tool-name mcp-server-lib--tools))
          (tool-args (alist-get 'arguments params))
-         (tool-args-vals (mcp-server-lib--parse-tool-args tool-args)))
+         (tool-args-vals
+          (if-let* ((args-spec (and tool (plist-get tool :args))))
+              (mcp-server-lib--reorder-args-by-schema tool-args args-spec)
+            (mcp-server-lib--parse-tool-args tool-args))))
     (if tool
         (condition-case err
             (mcp-server-lib--handle-tools-call-apply
@@ -1403,7 +1428,8 @@ See also:
                :description description
                :handler handler
                :async (plist-get properties :async)
-               :schema schema)))
+               :schema schema
+               :args args)))
         ;; Add optional properties if provided
         (when title
           (setq tool (plist-put tool :title title)))
