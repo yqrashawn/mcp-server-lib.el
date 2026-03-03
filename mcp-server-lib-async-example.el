@@ -9,7 +9,7 @@
 
 ;;; Option A: Run the entire tool handler in a subprocess
 
-(defun mcp-server-lib--handle-tools-call-apply-async (id tool args-vals method-metrics)
+(defun mcp-server-lib--handle-tools-call-apply-async (id tool args-vals)
   "Execute tool in a subprocess using async.el for true non-blocking behavior."
   (let* ((handler (plist-get tool :handler))
          (tool-name (plist-get tool :id))
@@ -17,7 +17,7 @@
          (working-dir (if (fboundp '++workspace-current-project-root)
                           (++workspace-current-project-root)
                         default-directory)))
-    
+
     ;; Start async subprocess
     (async-start
      ;; Code to run in subprocess
@@ -28,13 +28,13 @@
         (require 'mcp-server-lib)
         ;; Call the tool handler synchronously in subprocess
         (apply #',handler ',args-vals))
-     
+
      ;; Callback when subprocess finishes (runs in main Emacs, NON-BLOCKING)
      (lambda (result)
        ;; This callback is called when the subprocess completes
        ;; It runs in the main Emacs thread but does NOT block
        (mcp-server-lib--handle-tools-call-handle-result
-        id args-vals tool result method-metrics)))))
+        id args-vals tool result)))))
 
 ;;; Option B: Hybrid approach - keep current polling but reduce timeout
 
@@ -49,13 +49,13 @@
         (string-match-p "^build" tool-name)
         (string-match-p "^test" tool-name))))
 
-(defun mcp-server-lib--handle-tools-call-apply-hybrid (id tool args-vals method-metrics)
+(defun mcp-server-lib--handle-tools-call-apply-hybrid (id tool args-vals)
   "Use async.el for long-running tools, polling for quick tools."
   (if (mcp-server-lib--is-long-running-tool-p tool)
       ;; Long-running: use async.el subprocess (non-blocking)
-      (mcp-server-lib--handle-tools-call-apply-async id tool args-vals method-metrics)
+      (mcp-server-lib--handle-tools-call-apply-async id tool args-vals)
     ;; Quick tools: use current polling approach (may block briefly)
-    (mcp-server-lib--handle-tools-call-apply id tool args-vals method-metrics)))
+    (mcp-server-lib--handle-tools-call-apply id tool args-vals)))
 
 ;;; Usage Example
 

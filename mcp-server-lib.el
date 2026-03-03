@@ -36,7 +36,6 @@
 ;;
 ;; Additional commands:
 ;; - M-x mcp-server-lib-stop: Stop the MCP server
-;; - M-x mcp-server-lib-show-metrics: View usage statistics
 ;; - M-x mcp-server-lib-uninstall: Remove the stdio transport script
 ;;
 ;; The library handles JSON-RPC 2.0 communication, manages tool and resource
@@ -48,7 +47,6 @@
 
 (require 'cl-lib)
 (require 'json)
-(require 'mcp-server-lib-metrics)
 (require 'gptel)
 (require 'gptel-openai)
 (require 'lgr)
@@ -661,13 +659,12 @@ Returns cons of (template . params) or nil if no match found."
     nil))
 
 (defun mcp-server-lib--execute-resource-handler
-    (resource-data uri handler-params id method-metrics)
+    (resource-data uri handler-params id)
   "Execute a resource handler and return the response.
 RESOURCE-DATA is the plist containing handler and metadata.
 URI is the resource URI.
 HANDLER-PARAMS are parameters to pass to the handler (nil for direct resources).
-ID is the request ID.
-METHOD-METRICS is used to track errors."
+ID is the request ID."
   (condition-case err
       (let* ((handler (plist-get resource-data :handler))
              (mime-type (plist-get resource-data :mime-type))
@@ -683,22 +680,19 @@ METHOD-METRICS is used to track errors."
          id `((contents . ,(vector content-entry)))))
     ;; Handle resource-specific errors with custom error codes
     (mcp-server-lib-resource-error
-     (cl-incf (mcp-server-lib-metrics-errors method-metrics))
      (let ((code (car (cdr err)))
            (message (cadr (cdr err))))
        (mcp-server-lib--jsonrpc-error id code message)))
     ;; Handle any other error from the handler
     (error
-     (cl-incf (mcp-server-lib-metrics-errors method-metrics))
      (mcp-server-lib--jsonrpc-error
       id mcp-server-lib-jsonrpc-error-internal
       (format "Error reading resource %s: %s"
               uri (error-message-string err))))))
 
 (defun mcp-server-lib--handle-resources-read
-    (id params method-metrics)
-  "Handle resources/read request with ID and PARAMS.
-METHOD-METRICS is used to track errors for this method."
+    (id params)
+  "Handle resources/read request with ID and PARAMS."
   (let*
       ((uri (alist-get 'uri params))
        (resource (gethash uri mcp-server-lib--resources))
@@ -710,13 +704,13 @@ METHOD-METRICS is used to track errors for this method."
      ;; Direct resource found
      (resource
       (mcp-server-lib--execute-resource-handler
-       resource uri nil id method-metrics))
+       resource uri nil id))
      ;; Resource template match found
      (template-match
       (let ((template-data (car template-match))
             (params (cdr template-match)))
         (mcp-server-lib--execute-resource-handler
-         template-data uri params id method-metrics)))
+         template-data uri params id)))
      ;; No resource or resource template found
      (t
       (mcp-server-lib--jsonrpc-error
@@ -730,33 +724,30 @@ ID is the JSON-RPC request ID to use in response.
 METHOD is the JSON-RPC method name to dispatch.
 PARAMS is the JSON-RPC params object from the request.
 Returns a JSON-RPC response string for the request."
-  (let ((method-metrics (mcp-server-lib-metrics--get method)))
-    (cl-incf (mcp-server-lib-metrics-calls method-metrics))
-
-    (cond
-     ((equal method "initialize")
-      (mcp-server-lib--handle-initialize id))
-     ((equal method "notifications/initialized")
-      (mcp-server-lib--handle-initialized)
-      nil)
-     ((equal method "notifications/cancelled")
-      nil)
-     ((equal method "tools/list")
-      (mcp-server-lib--handle-tools-list id))
-     ((equal method "resources/list")
-      (mcp-server-lib--handle-resources-list id))
-     ((equal method "resources/templates/list")
-      (mcp-server-lib--handle-resources-templates-list id))
-     ((equal method "resources/read")
-      (mcp-server-lib--handle-resources-read
-       id params method-metrics))
-     ((equal method "tools/call")
-      (mcp-server-lib--handle-tools-call id params method-metrics))
-     (t
-      (mcp-server-lib--jsonrpc-error
-       id
-       mcp-server-lib-jsonrpc-error-method-not-found
-       (format "Method not found: %s" method))))))
+  (cond
+   ((equal method "initialize")
+    (mcp-server-lib--handle-initialize id))
+   ((equal method "notifications/initialized")
+    (mcp-server-lib--handle-initialized)
+    nil)
+   ((equal method "notifications/cancelled")
+    nil)
+   ((equal method "tools/list")
+    (mcp-server-lib--handle-tools-list id))
+   ((equal method "resources/list")
+    (mcp-server-lib--handle-resources-list id))
+   ((equal method "resources/templates/list")
+    (mcp-server-lib--handle-resources-templates-list id))
+   ((equal method "resources/read")
+    (mcp-server-lib--handle-resources-read
+     id params))
+   ((equal method "tools/call")
+    (mcp-server-lib--handle-tools-call id params))
+   (t
+    (mcp-server-lib--jsonrpc-error
+     id
+     mcp-server-lib-jsonrpc-error-method-not-found
+     (format "Method not found: %s" method)))))
 
 ;;; Notification handlers
 
@@ -890,7 +881,7 @@ Returns a list of all registered resource templates."
      id `((resourceTemplates . ,template-list)))))
 
 (defun mcp-server-lib--handle-tools-call-handle-result
-    (id args-vals tool result method-metrics)
+    (id args-vals tool result)
   (let ((context (list :id id))
         (tool-name (plist-get tool :id)))
     (condition-case err
@@ -912,14 +903,11 @@ Returns a list of all registered resource templates."
                    `((type . "text") (text . ,result-text))))
                 (isError . :json-false))))
           (mcp-server-lib-log-tool-call tool-name args-vals result-text nil)
-          (mcp-server-lib-metrics--track-tool-call tool-name)
           (mcp-server-lib--respond-with-result
            context formatted-result))
       (mcp-server-lib-log-tool-call tool-name args-vals nil t)
       ;; Handle invalid parameter errors
       (mcp-server-lib-invalid-params
-       (mcp-server-lib-metrics--track-tool-call tool-name t)
-       (cl-incf (mcp-server-lib-metrics-errors method-metrics))
        (mcp-server-lib--jsonrpc-error
         id
         mcp-server-lib-jsonrpc-error-invalid-params
@@ -927,8 +915,6 @@ Returns a list of all registered resource templates."
       ;; Handle tool-specific errors thrown with
       ;; mcp-server-lib-tool-throw
       (mcp-server-lib-tool-error
-       (mcp-server-lib-metrics--track-tool-call tool-name t)
-       (cl-incf (mcp-server-lib-metrics-errors method-metrics))
        (let ((formatted-error
               `((content
                  .
@@ -939,19 +925,14 @@ Returns a list of all registered resource templates."
           context formatted-error)))
       ;; Keep existing handling for all other errors
       (error
-       (mcp-server-lib-metrics--track-tool-call tool-name t)
-       (cl-incf (mcp-server-lib-metrics-errors method-metrics))
        (mcp-server-lib--jsonrpc-error
         id
-        ;; mcp-server-lib-jsonrpc-error-internal
-        ;; (format "Internal error executing tool: %s"
-        ;;         (error-message-string err))
         mcp-server-lib-jsonrpc-error-invalid-request
         (format "Error executing tool: %s"
                 (error-message-string err)))))))
 
 (defun mcp-server-lib--handle-tools-call-apply
-    (id tool args-vals method-metrics)
+    (id tool args-vals)
   (let* ((is-async (plist-get tool :async))
          (handler (plist-get tool :handler))
          (default-directory
@@ -974,15 +955,14 @@ Returns a list of all registered resource templates."
             (let ((response-fn mcp-server-lib--async-response-fn)
                   (tool-id id)
                   (tool-args args-vals)
-                  (tool-ref tool)
-                  (metrics method-metrics))
+                  (tool-ref tool))
               (condition-case err
                   (apply handler
                          (lambda (result)
                            (condition-case err2
                                (funcall response-fn
                                         (mcp-server-lib--handle-tools-call-handle-result
-                                         tool-id tool-args tool-ref result metrics))
+                                         tool-id tool-args tool-ref result))
                              (error
                               (funcall response-fn
                                        (mcp-server-lib--jsonrpc-error
@@ -1038,7 +1018,6 @@ Returns a list of all registered resource templates."
                          (error-message-string (car error-cell)))))
                ;; Timeout
                ((not (car done-cell))
-                (cl-incf (mcp-server-lib-metrics-errors method-metrics))
                 (mcp-server-lib--jsonrpc-error
                  id
                  mcp-server-lib-jsonrpc-error-internal
@@ -1046,14 +1025,13 @@ Returns a list of all registered resource templates."
                ;; Success - handle result
                (t
                 (mcp-server-lib--handle-tools-call-handle-result
-                 id args-vals tool (car result-cell) method-metrics))))))
+                 id args-vals tool (car result-cell)))))))
       ;; Sync handler: call directly and handle result
       (mcp-server-lib--handle-tools-call-handle-result
        id
        args-vals
        tool
-       (apply handler args-vals)
-       method-metrics))))
+       (apply handler args-vals)))))
 
 (defun mcp-server-lib--parse-tool-arg (v)
   (if (consp v)
@@ -1118,28 +1096,24 @@ Each value is parsed and vectors are converted to lists of plists."
          nil)))
    args-spec))
 
-(defun mcp-server-lib--handle-tools-call (id params method-metrics)
-  "Handle tools/call request with ID and PARAMS.
-METHOD-METRICS is used to track errors for this method."
+(defun mcp-server-lib--handle-tools-call (id params)
+  "Handle tools/call request with ID and PARAMS."
   (let* ((tool-name (alist-get 'name params))
          (tool (gethash tool-name mcp-server-lib--tools))
          (tool-args (alist-get 'arguments params))
          (tool-args-vals
           (if-let* ((args-spec (and tool (plist-get tool :args))))
-              (mcp-server-lib--reorder-args-by-schema tool-args args-spec)
+            (mcp-server-lib--reorder-args-by-schema tool-args args-spec)
             (mcp-server-lib--parse-tool-args tool-args))))
     (if tool
         (condition-case err
             (mcp-server-lib--handle-tools-call-apply
              id
              tool
-             tool-args-vals
-             method-metrics)
+             tool-args-vals)
           (mcp-server-lib-log-tool-call tool-name tool-args-vals nil t)
           ;; Handle invalid parameter errors
           (mcp-server-lib-invalid-params
-           (mcp-server-lib-metrics--track-tool-call tool-name t)
-           (cl-incf (mcp-server-lib-metrics-errors method-metrics))
            (mcp-server-lib--jsonrpc-error
             id
             mcp-server-lib-jsonrpc-error-invalid-params
@@ -1147,8 +1121,6 @@ METHOD-METRICS is used to track errors for this method."
           ;; Handle tool-specific errors thrown with
           ;; mcp-server-lib-tool-throw
           (mcp-server-lib-tool-error
-           (mcp-server-lib-metrics--track-tool-call tool-name t)
-           (cl-incf (mcp-server-lib-metrics-errors method-metrics))
            (let ((formatted-error
                   `((content
                      .
@@ -1159,15 +1131,11 @@ METHOD-METRICS is used to track errors for this method."
               context formatted-error)))
           ;; Keep existing handling for all other errors
           (error
-           (mcp-server-lib-metrics--track-tool-call tool-name t)
-           (cl-incf (mcp-server-lib-metrics-errors method-metrics))
            (mcp-server-lib--jsonrpc-error
             id
             mcp-server-lib-jsonrpc-error-internal
             (format "Internal error executing tool: %s"
                     (error-message-string err)))))
-      (mcp-server-lib-metrics--track-tool-call tool-name t)
-      (cl-incf (mcp-server-lib-metrics-errors method-metrics))
       (mcp-server-lib--jsonrpc-error
        id
        mcp-server-lib-jsonrpc-error-invalid-request

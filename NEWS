@@ -46,8 +46,6 @@ mcp-server-lib.el NEWS -- history of user-visible changes
     - mcp-server-lib-ert-check-error-object
     - mcp-server-lib-ert-get-resource-list
     - mcp-server-lib-ert-get-success-result
-    - mcp-server-lib-ert-verify-req-success
-    - mcp-server-lib-ert-with-metrics-tracking
     - mcp-server-lib-ert-assert-initialize-result
     - mcp-server-lib-ert-get-initialize-result
 

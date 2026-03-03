@@ -26,7 +26,6 @@
 ;;; Code:
 
 (require 'mcp-server-lib)
-(require 'mcp-server-lib-metrics)
 
 ;;;###autoload
 (defun mcp-server-lib-start ()
@@ -37,14 +36,11 @@ requests via `mcp-server-lib-process-jsonrpc'.  Once started, the server
 will dispatch incoming requests to the appropriate tool
 handlers that have been registered with `mcp-server-lib-register-tool'.
 
-Resets all metrics when starting.
-
 See also: `mcp-server-lib-stop'"
   (interactive)
   (when mcp-server-lib--running
     (error "MCP server is already running"))
 
-  (clrhash mcp-server-lib-metrics--table)
   (when (called-interactively-p 'any)
     (message "Emacs starting handling MCP requests"))
   (setq mcp-server-lib--running t))
@@ -74,10 +70,6 @@ See also: `mcp-server-lib-start'"
   
   ;; Mark server as not running
   (setq mcp-server-lib--running nil)
-  
-  ;; Show metrics summary if there are any
-  (when (> (hash-table-count mcp-server-lib-metrics--table) 0)
-    (message "%s" (mcp-server-lib-metrics-summary)))
   t)
 
 ;;; Script Installation
@@ -128,136 +120,6 @@ Returns nil if not found."
       (delete-file target)
       (message "Script removed from: %s" target))))
 
-;;; Metrics commands
-
-;;;###autoload
-(defun mcp-server-lib-reset-metrics ()
-  "Reset all metrics."
-  (interactive)
-  (clrhash mcp-server-lib-metrics--table)
-  (message "MCP metrics reset"))
-
-(defun mcp-server-lib--format-metrics-with-errors
-    (key metrics &optional indent)
-  "Format metrics KEY with METRICS including error rate.
-Optional INDENT adds spaces before the key."
-  (let* ((total (mcp-server-lib-metrics-calls metrics))
-         (errors (mcp-server-lib-metrics-errors metrics))
-         (rate (mcp-server-lib-metrics--error-rate total errors))
-         (formatted-key
-          (if indent
-              (format "  %-38s" key)
-            (format "%-40s" key))))
-    (format "%s %6d %7d %9.1f%%\n" formatted-key total errors rate)))
-
-;;;###autoload
-(defun mcp-server-lib-show-metrics ()
-  "Display metrics in a buffer."
-  (interactive)
-  (with-current-buffer (get-buffer-create "*MCP Metrics*")
-    (erase-buffer)
-    (insert "MCP Usage Metrics\n")
-    (insert "=================\n\n")
-    (insert (format-time-string "Session started: %F %T\n\n"))
-
-    ;; Separate into three categories
-    (let ((method-metrics nil)
-          (notification-metrics nil)
-          (tool-metrics nil))
-      (maphash
-       (lambda (key metrics)
-         (cond
-          ((string-match-p ":" key)
-           (push (cons key metrics) tool-metrics))
-          ((string-prefix-p "notifications/" key)
-           (push (cons key metrics) notification-metrics))
-          (t
-           (push (cons key metrics) method-metrics))))
-       mcp-server-lib-metrics--table)
-
-      ;; Display method-level metrics
-      (when method-metrics
-        (insert "Method Calls:\n")
-        (insert
-         "---------------------------------------- ------ ------- ----------\n")
-        (dolist (entry
-                 (sort
-                  method-metrics
-                  (lambda (a b) (string< (car a) (car b)))))
-          (insert
-           (mcp-server-lib--format-metrics-with-errors
-            (car entry) (cdr entry))))
-        (insert "\n"))
-
-      ;; Display notifications
-      (when notification-metrics
-        (insert "Notifications:\n")
-        (insert "---------------------------------------- ------\n")
-        (dolist (entry
-                 (sort
-                  notification-metrics
-                  (lambda (a b) (string< (car a) (car b)))))
-          (let* ((key (car entry))
-                 (metrics (cdr entry))
-                 (total (mcp-server-lib-metrics-calls metrics)))
-            ;; Notifications don't have errors, so simpler display
-            (insert (format "%-40s %6d\n" key total))))
-        (insert "\n"))
-
-      ;; Display tool-specific metrics
-      (when tool-metrics
-        (insert "Tool Usage:\n")
-        (insert
-         "---------------------------------------- ------ ------- ----------\n")
-        (dolist (entry
-                 (sort
-                  tool-metrics
-                  (lambda (a b) (string< (car a) (car b)))))
-          (let* ((key (car entry))
-                 (metrics (cdr entry))
-                 (display-name
-                  (if (string-match "tools/call:\\(.*\\)" key)
-                      (match-string 1 key)
-                    key)))
-            (insert
-             (mcp-server-lib--format-metrics-with-errors
-              display-name metrics
-              t)))))
-
-      ;; Summary with totals
-      (let ((method-total 0)
-            (method-errors 0)
-            (tool-total 0)
-            (tool-errors 0))
-        ;; Calculate totals
-        (dolist (entry method-metrics)
-          (let ((metrics (cdr entry)))
-            (cl-incf
-             method-total (mcp-server-lib-metrics-calls metrics))
-            (cl-incf
-             method-errors (mcp-server-lib-metrics-errors metrics))))
-        (dolist (entry tool-metrics)
-          (let ((metrics (cdr entry)))
-            (cl-incf
-             tool-total (mcp-server-lib-metrics-calls metrics))
-            (cl-incf
-             tool-errors (mcp-server-lib-metrics-errors metrics))))
-
-        ;; Display summary
-        (insert "\nSummary:\n")
-        (insert "--------\n")
-        (insert
-         (format "Methods: %d calls, %d errors (%.1f%%)\n"
-                 method-total method-errors
-                 (mcp-server-lib-metrics--error-rate
-                  method-total method-errors)))
-        (insert
-         (format "Tools: %d calls, %d errors (%.1f%%)\n"
-                 tool-total tool-errors
-                 (mcp-server-lib-metrics--error-rate
-                  tool-total tool-errors))))))
-
-  (display-buffer (current-buffer)))
 
 (provide 'mcp-server-lib-commands)
 

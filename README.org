@@ -15,7 +15,7 @@
 - Resource templates with URI pattern matching (RFC 6570 subset)
 - Handles MCP protocol communication and JSON-RPC messages
 - Stdio transport via emacsclient wrapper script
-- Built-in usage metrics and debugging support
+- Built-in debugging support
 
 * Requirements
 
@@ -258,24 +258,6 @@ For testing and debugging:
 The =mcp-server-lib-ert= module provides utilities for writing ERT tests for MCP servers:
 
 #+begin_src elisp
-;; Track metrics changes during test execution
-(mcp-server-lib-ert-with-metrics-tracking
-    ((method expected-calls expected-errors) ...)
-  ;; Test code here
-  )
-
-;; Example: Verify a method is called once with no errors
-(mcp-server-lib-ert-with-metrics-tracking
-    (("tools/list" 1 0))
-  ;; Code that should call tools/list once
-  (mcp-server-lib-process-jsonrpc-parsed
-   (mcp-server-lib-create-tools-list-request)))
-
-;; Simplified syntax for verifying successful single method calls
-(mcp-server-lib-ert-verify-req-success "tools/list"
-  (mcp-server-lib-process-jsonrpc-parsed
-   (mcp-server-lib-create-tools-list-request)))
-
 ;; Process a request and get the successful result
 (let* ((request (mcp-server-lib-create-tools-list-request))
        (tools (mcp-server-lib-ert-get-success-result "tools/list" request)))
@@ -283,7 +265,7 @@ The =mcp-server-lib-ert= module provides utilities for writing ERT tests for MCP
   (should (arrayp tools)))
 
 ;; High-level tool testing helper - simplifies tool calls
-;; This function combines request creation, processing, metrics verification,
+;; This function combines request creation, processing,
 ;; and text extraction into a single call
 (let* ((params '(("name" . "John") ("greeting" . "Hello")))
        (result (mcp-server-lib-ert-call-tool "greet-user" params)))
@@ -342,13 +324,6 @@ Enable JSON-RPC message logging:
 
 #+begin_src elisp
 (setq mcp-server-lib-log-io t)  ; Log to *mcp-server-lib-log* buffer
-#+end_src
-
-View usage metrics:
-
-#+begin_src elisp
-M-x mcp-server-lib-show-metrics
-M-x mcp-server-lib-reset-metrics
 #+end_src
 
 ** Customization

@@ -11,7 +11,6 @@
 
 (package-file "mcp-server-lib.el")
 (files "mcp-server-lib-commands.el"
-       "mcp-server-lib-metrics.el"
        "mcp-server-lib-ert.el"
        "emacs-mcp-stdio.sh")
 

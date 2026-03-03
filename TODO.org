@@ -135,8 +135,7 @@
   - Would allow monitoring transport-level issues
 - [X] Test all interactive commands
   - The mcp-server-lib-test-interactive-commands test only checks start/stop
-  - Should also test mcp-server-lib-install, mcp-server-lib-uninstall,
-    mcp-server-lib-reset-metrics, mcp-server-lib-show-metrics
+  - Should also test mcp-server-lib-install, mcp-server-lib-uninstall
 - [X] Unit tests for initialize handshake
   - [X] Test valid initialize request handling
   - [X] Test protocol version compatibility
@@ -234,7 +233,3 @@
   - Show what not to do (exposing Emacs objects)
   - Show LLM-friendly return values
   - Patterns for complex inputs (JSON strings, plists)
-- [ ] Document metrics system
-  - What metrics are collected and why
-  - When to use metrics in practice
-  - How to interpret metrics output

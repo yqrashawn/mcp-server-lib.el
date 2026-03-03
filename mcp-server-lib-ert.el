@@ -29,7 +29,6 @@
 ;;; Code:
 
 (require 'ert)
-(require 'mcp-server-lib-metrics)
 (require 'mcp-server-lib-commands)
 
 (defun mcp-server-lib-ert-check-text-response
@@ -70,65 +69,6 @@ Signals test failure if response structure is invalid."
           ;; Return the text content
           text)))))
 
-(defmacro mcp-server-lib-ert-with-metrics-tracking
-    (metrics-specs &rest body)
-  "Execute BODY and verify metrics changed as expected.
-METRICS-SPECS is a list of (METRICS-KEY EXPECTED-CALLS EXPECTED-ERRORS) lists.
-Returns the result of the last form in BODY.
-
-Arguments:
-  METRICS-SPECS - List of metric specifications, each containing:
-    - METRICS-KEY: String key for the metric to track
-    - EXPECTED-CALLS: Number of expected call increments
-    - EXPECTED-ERRORS: Number of expected error increments
-  BODY - Forms to execute while tracking metrics
-
-Example:
-  (mcp-server-lib-ert-with-metrics-tracking
-      ((\"initialize\" 1 0)
-       (\"tools/list\" 2 0))
-    ;; Code that should increment initialize calls by 1
-    ;; and tools/list calls by 2 with no errors
-    ...)"
-  (declare (indent 1) (debug t))
-  (let ((before-bindings '())
-        (after-checks '())
-        (result-var (gensym "result")))
-    ;; Build bindings and checks for each metric
-    (dolist (spec metrics-specs)
-      (let* ((key (car spec))
-             (expected-calls (cadr spec))
-             (expected-errors (caddr spec))
-             (metrics-var (gensym "metrics"))
-             (calls-var (gensym "calls"))
-             (errors-var (gensym "errors")))
-        ;; Add before bindings
-        (push `(,metrics-var (mcp-server-lib-metrics-get ,key))
-              before-bindings)
-        (push `(,calls-var
-                (mcp-server-lib-metrics-calls ,metrics-var))
-              before-bindings)
-        (push `(,errors-var
-                (mcp-server-lib-metrics-errors ,metrics-var))
-              before-bindings)
-        ;; Add after checks
-        (push `(let ((metrics-after
-                      (mcp-server-lib-metrics-get ,key)))
-                 (should
-                  (= (+ ,calls-var ,expected-calls)
-                     (mcp-server-lib-metrics-calls metrics-after)))
-                 (should
-                  (= (+ ,errors-var ,expected-errors)
-                     (mcp-server-lib-metrics-errors metrics-after))))
-              after-checks)))
-    `(let* (,@
-            (nreverse before-bindings)
-            (,result-var
-             (progn
-               ,@body)))
-       ,@
-       (nreverse after-checks)
-       ,result-var)))
 
 (defun mcp-server-lib-ert--validate-jsonrpc-response
     (response expected-payload-field &optional expected-id)
@@ -151,46 +91,19 @@ Returns the value of the expected payload field."
         (should (equal expected-id id))))
     payload))
 
-(defmacro mcp-server-lib-ert-verify-req-success (method &rest body)
-  "Execute BODY and verify METHOD metrics show success (+1 call, +0 errors).
-Captures metrics before BODY execution and asserts after that:
-- calls increased by 1
-- errors stayed the same
-
-Arguments:
-  METHOD - The MCP method name to track (e.g., \"tools/list\")
-  BODY - Forms to execute while tracking metrics
-
-Example:
-  (mcp-server-lib-ert-verify-req-success \"tools/list\"
-    (let ((response (mcp-server-lib-process-jsonrpc-parsed request)))
-      (should-not (alist-get \\='error response))
-      (alist-get \\='result response)))"
-  (declare (indent defun) (debug t))
-  `(mcp-server-lib-ert-with-metrics-tracking ((,method 1 0))
-     ,@body))
-
-(defun mcp-server-lib-ert-get-success-result (method request)
+(defun mcp-server-lib-ert-get-success-result (_method request)
   "Process REQUEST and return the result from a successful response.
-METHOD is the JSON-RPC method name for metrics verification.
+_METHOD is accepted for backward compatibility but unused.
 This function expects the request to succeed and will fail the test if an
-error is present in the response.  It verifies that the response contains no
-error and that the method metrics show success before returning the result.
+error is present in the response.
 
 Arguments:
-  METHOD - The MCP method name for metrics tracking (e.g., \"initialize\")
+  _METHOD - Unused, kept for API compatibility
   REQUEST - The JSON-RPC request to process
 
-Returns the \\='result field from the response.
-
-Example:
-  (let* ((request (mcp-server-lib-create-tools-list-request))
-         (tools (mcp-server-lib-ert-get-success-result \"tools/list\" request)))
-    ;; tools now contains the tools array from the response
-    (should (arrayp tools)))"
-  (mcp-server-lib-ert-verify-req-success method
-    (let ((resp-obj (mcp-server-lib-process-jsonrpc-parsed request)))
-      (mcp-server-lib-ert--validate-jsonrpc-response resp-obj 'result))))
+Returns the \\='result field from the response."
+  (let ((resp-obj (mcp-server-lib-process-jsonrpc-parsed request)))
+    (mcp-server-lib-ert--validate-jsonrpc-response resp-obj 'result)))
 
 (defun mcp-server-lib-ert--get-initialize-result ()
   "Send an MCP \\='initialize request and return its result.
@@ -287,9 +200,9 @@ Example:
     result))
 
 (cl-defmacro
- mcp-server-lib-ert-with-server
- (&rest body &key tools resources &allow-other-keys)
- "Run BODY with MCP server active and initialized.
+    mcp-server-lib-ert-with-server
+    (&rest body &key tools resources &allow-other-keys)
+  "Run BODY with MCP server active and initialized.
 Starts the server, sends initialize request, then runs BODY.
 TOOLS and RESOURCES are booleans indicating expected capabilities.
 
@@ -315,22 +228,22 @@ Example:
   (mcp-server-lib-ert-with-server :tools t :resources nil
     (let ((tools (mcp-server-lib-ert-get-resource-list)))
       (should (arrayp tools))))"
- (declare (indent defun) (debug t))
- `(unwind-protect
-      (progn
-        (mcp-server-lib-start)
-        (mcp-server-lib-ert-assert-initialize-result
-         (mcp-server-lib-ert--get-initialize-result)
-         ,tools
-         ,resources)
-        ;; Send initialized notification - should return nil
-        (should-not
-         (mcp-server-lib-process-jsonrpc
-          (json-encode
-           '(("jsonrpc" . "2.0")
-             ("method" . "notifications/initialized")))))
-        ,@body)
-    (mcp-server-lib-stop)))
+  (declare (indent defun) (debug t))
+  `(unwind-protect
+       (progn
+         (mcp-server-lib-start)
+         (mcp-server-lib-ert-assert-initialize-result
+          (mcp-server-lib-ert--get-initialize-result)
+          ,tools
+          ,resources)
+         ;; Send initialized notification - should return nil
+         (should-not
+          (mcp-server-lib-process-jsonrpc
+           (json-encode
+            '(("jsonrpc" . "2.0")
+              ("method" . "notifications/initialized")))))
+         ,@body)
+     (mcp-server-lib-stop)))
 
 (defun mcp-server-lib-ert-check-error-object
     (response expected-code expected-message)
@@ -348,14 +261,14 @@ Example:
 (defun mcp-server-lib-ert--read-resource (uri)
   "Send a resources/read request for URI and return the parsed response."
   (let ((request
-         (mcp-server-lib-create-resources-read-request
-          uri mcp-server-lib-ert--resource-read-request-id)))
+          (mcp-server-lib-create-resources-read-request
+           uri mcp-server-lib-ert--resource-read-request-id)))
     (mcp-server-lib-process-jsonrpc-parsed request)))
 
 (defun mcp-server-lib-ert-verify-resource-read (uri expected-fields)
   "Verify that reading resource at URI succeeds with EXPECTED-FIELDS.
 EXPECTED-FIELDS is an alist of (field . value) pairs to verify in the content."
-  (mcp-server-lib-ert-verify-req-success "resources/read"
+  (progn
     (let* ((response (mcp-server-lib-ert--read-resource uri))
            (result (mcp-server-lib-ert--validate-jsonrpc-response
                     response 'result
@@ -384,7 +297,6 @@ EXPECTED-FIELDS is an alist of (field . value) pairs to verify in the content."
 (defun mcp-server-lib-ert-call-tool (tool-name params)
   "Call TOOL-NAME with PARAMS and return the text content string.
 Handles all error checking and response extraction automatically.
-Verifies metrics show success (+1 call, +0 errors) at method and tool levels.
 Signals test failure if JSON-RPC or MCP errors occur.
 
 Arguments:
@@ -393,15 +305,11 @@ Arguments:
 
 Returns:
   The text content string from the tool response"
-  (let ((tool-metrics-key (format "tools/call:%s" tool-name)))
-    (mcp-server-lib-ert-with-metrics-tracking
-        (("tools/call" 1 0)
-         (tool-metrics-key 1 0))
-      (let* ((request (mcp-server-lib-create-tools-call-request 
-                       tool-name nil params))
-             (response (mcp-server-lib-process-jsonrpc-parsed request)))
-        (should-not (alist-get 'error response))
-        (mcp-server-lib-ert-check-text-response response)))))
+  (let* ((request (mcp-server-lib-create-tools-call-request
+                   tool-name nil params))
+         (response (mcp-server-lib-process-jsonrpc-parsed request)))
+    (should-not (alist-get 'error response))
+    (mcp-server-lib-ert-check-text-response response)))
 
 (defun mcp-server-lib-ert-process-tool-response (response)
   "Process MCP tool response from JSON-RPC, handling both success and error cases.
