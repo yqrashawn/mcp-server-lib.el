@@ -132,7 +132,7 @@ THIS is a rotating file appender."
             tool-name
             :args (format "%s" tool-args)
             :rst result)))
-    (-const nil)))
+    (error nil)))
 
 ;;; JSON encoding compatibility
 
@@ -151,10 +151,35 @@ THIS is a rotating file appender."
            (json-null :null))
        (json-read))))
 
+(defun mcp-server-lib--ensure-multibyte (object)
+  "Recursively ensure all strings in OBJECT are safe for `json-serialize'.
+This prevents `json-serialize' from failing with `wrong-type-argument:
+json-value-p' when encountering unibyte strings or multibyte strings
+containing eight-bit characters (from unibyte/multibyte concatenation)."
+  (cond
+   ((stringp object)
+    (cond
+     ((not (multibyte-string-p object))
+      ;; Unibyte string: decode as UTF-8
+      (decode-coding-string object 'utf-8 t))
+     ((memq 'eight-bit (find-charset-string object))
+      ;; Multibyte with raw bytes: re-encode and decode as UTF-8
+      (decode-coding-string (encode-coding-string object 'raw-text-unix) 'utf-8 t))
+     (t object)))
+   ((vectorp object)
+    (let ((result (copy-sequence object)))
+      (dotimes (i (length result))
+        (aset result i (mcp-server-lib--ensure-multibyte (aref result i))))
+      result))
+   ((consp object)
+    (cons (mcp-server-lib--ensure-multibyte (car object))
+          (mcp-server-lib--ensure-multibyte (cdr object))))
+   (t object)))
+
 (defmacro mcp-server-lib--json-encode (object)
   "Encode OBJECT to JSON using gptel's semantics."
   (if (fboundp 'json-serialize)
-      `(json-serialize ,object
+      `(json-serialize (mcp-server-lib--ensure-multibyte ,object)
         :null-object :null
         :false-object :json-false)
     (require 'json)
