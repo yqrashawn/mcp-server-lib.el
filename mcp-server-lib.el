@@ -89,6 +89,7 @@ Files are named BASE-HOSTNAME-YYYY-MM-DD-HH.log."
   ((this mcp-server-lib--rotating-file-appender) (event lgr-event))
   "Append EVENT to an hourly-rotated log file.
 THIS is a rotating file appender."
+  (oset event timezone nil)
   (let* ((hostname (car (split-string (system-name) "\\.")))
          (time-str (format-time-string "%Y-%m-%d-%H"))
          (filename (expand-file-name
