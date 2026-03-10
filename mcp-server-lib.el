@@ -256,6 +256,16 @@ loop, preventing nested `accept-process-output' from blocking
 `recursive-edit' keyboard input when multiple agents call async
 tools concurrently.")
 
+(defcustom mcp-server-lib-interactive-tools '("ask_user_question")
+  "List of tool names that require the main thread for interactive input.
+Tools in this list use `recursive-edit' or similar mechanisms that
+only work on the main Emacs thread (e.g. reading keyboard input).
+These tools are dispatched via `run-at-time' on the main thread.
+All other tools are dispatched via `make-thread' to avoid blocking
+Emacs during long-running operations."
+  :type '(repeat string)
+  :group 'mcp-server-lib)
+
 ;;; Public Constants
 
 (defconst mcp-server-lib-name "emacs-mcp-server-lib"
