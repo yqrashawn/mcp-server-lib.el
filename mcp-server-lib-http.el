@@ -45,6 +45,7 @@
 (require 'mcp-server-lib)
 (require 'simple-httpd)
 (require 'json)
+(require 'lgr)
 
 ;;; Customization
 
@@ -73,6 +74,31 @@
   :type 'boolean
   :group 'mcp-server-lib-http)
 
+(defcustom mcp-server-lib-http-log-base-name "mcp-http"
+  "Base name for HTTP request log files.
+Files are named BASE-HOSTNAME-YYYY-MM-DD-HH.log.
+Uses `mcp-server-lib-log-directory' for the directory."
+  :type 'string
+  :group 'mcp-server-lib-http)
+
+;;; HTTP file logger
+
+(defvar mcp-server-lib-http-logger (lgr-get-logger "mcp-server-lib-http")
+  "Logger for MCP HTTP requests, separate from tool call logger.")
+
+(when mcp-server-lib-log-directory
+  (lgr-reset-appenders mcp-server-lib-http-logger)
+  (-> mcp-server-lib-http-logger
+      (lgr-add-appender
+       (-> (mcp-server-lib--rotating-file-appender
+            :directory (file-truename mcp-server-lib-log-directory)
+            :base-name mcp-server-lib-http-log-base-name)
+           (lgr-set-layout
+            (lgr-layout-format
+             :format "[%t] %L %m"
+             :timestamp-format "%Y-%m-%d %H:%M:%S"))))
+      (lgr-set-threshold lgr-level-debug)))
+
 ;;; Internal variables
 
 
@@ -80,9 +106,12 @@
 ;;; Helper functions
 
 (defun mcp-server-lib-http--log (message &rest args)
-  "Log MESSAGE with ARGS if logging is enabled."
+  "Log MESSAGE with ARGS if logging is enabled.
+Logs to `*Messages*' and to a rotating log file."
   (when mcp-server-lib-http-log-requests
-    (apply #'message (concat "[MCP HTTP] " message) args)))
+    (let ((formatted (apply #'format message args)))
+      (message "[MCP HTTP] %s" formatted)
+      (lgr-debug mcp-server-lib-http-logger "%s" formatted))))
 
 (defun mcp-server-lib-http--send-error (proc code message)
   "Send error response with CODE and MESSAGE to PROC."
@@ -134,23 +163,30 @@ the session-id and working directory."
             (when keepalive-timer
               (cancel-timer keepalive-timer)
               (setq keepalive-timer nil))
-            (if (not (process-live-p proc))
-                (message "[MCP HTTP] Cannot send async response: connection dead (status: %s)"
-                         (process-status proc))
-              (condition-case err
-                  (if chunked-mode
-                      (if response
-                          (let ((len (string-bytes response)))
-                            (process-send-string
-                             proc (format "%x\r\n%s\r\n0\r\n\r\n" len response)))
-                        (process-send-string proc "0\r\n\r\n"))
-                    (if response
-                        (mcp-server-lib-http--send-response proc response)
-                      (with-temp-buffer
-                        (httpd-send-header proc "text/plain" 202))))
-                (error
-                 (message "[MCP HTTP] Error sending async response: %s"
-                          (error-message-string err))))))))
+            (let ((proc-status (process-status proc))
+                  (resp-len (and response (length response))))
+              (message "[MCP HTTP] Async callback: proc=%s resp-len=%s chunked=%s"
+                       proc-status resp-len chunked-mode)
+              (if (not (process-live-p proc))
+                  (message "[MCP HTTP] Cannot send async response: connection dead (status: %s)"
+                           proc-status)
+                (condition-case err
+                    (progn
+                      (if chunked-mode
+                          (if response
+                              (let ((len (string-bytes response)))
+                                (process-send-string
+                                 proc (format "%x\r\n%s\r\n0\r\n\r\n" len response)))
+                            (process-send-string proc "0\r\n\r\n"))
+                        (if response
+                            (mcp-server-lib-http--send-response proc response)
+                          (with-temp-buffer
+                            (httpd-send-header proc "text/plain" 202))))
+                      (message "[MCP HTTP] Async response sent successfully (%s bytes)"
+                               resp-len))
+                  (error
+                   (message "[MCP HTTP] Error sending async response: %s"
+                            (error-message-string err)))))))))
     (condition-case err
         (let ((response (mcp-server-lib-process-jsonrpc body)))
           (cond
@@ -173,10 +209,15 @@ the session-id and working directory."
                           (run-at-time
                            15 15
                            (lambda ()
-                             (when (process-live-p proc)
-                               (ignore-errors
-                                 (process-send-string
-                                  proc "1\r\n \r\n")))))))
+                             (if (process-live-p proc)
+                                 (ignore-errors
+                                   (process-send-string
+                                    proc "1\r\n \r\n"))
+                               (message "[MCP HTTP] Keepalive: proc died mid-wait (status: %s)"
+                                        (process-status proc))
+                               (when keepalive-timer
+                                 (cancel-timer keepalive-timer)
+                                 (setq keepalive-timer nil)))))))
                 (error
                  (message "[MCP HTTP] Error starting chunked stream: %s"
                           (error-message-string err2))))))
