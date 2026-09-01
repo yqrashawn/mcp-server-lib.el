@@ -160,10 +160,16 @@ request, issued during the wait, that is never dispatched."
                    (json-encode
                     '((jsonrpc . "2.0") (id . 1)
                       (result . ((content . [((type . "text") (text . "done"))]))))))
+          ;; Guard against `seq-every-p' passing vacuously on an empty
+          ;; list -- `(seq-every-p pred nil)' is t, so if
+          ;; `--server-conns' ever returned nil (name-prefix drift,
+          ;; teardown timing) this wait would report success on its
+          ;; very first poll, having proven nothing.
           (should (mcp-server-lib-http-test--wait
                    (lambda ()
-                     (seq-every-p (lambda (p) (null (process-get p :request-active)))
-                                  (mcp-server-lib-http-test--server-conns))))))
+                     (and (mcp-server-lib-http-test--server-conns)
+                          (seq-every-p (lambda (p) (null (process-get p :request-active)))
+                                       (mcp-server-lib-http-test--server-conns)))))))
       (when (and proc (process-live-p proc)) (delete-process proc))
       (when (and proc (buffer-live-p (process-buffer proc)))
         (kill-buffer (process-buffer proc)))
@@ -204,7 +210,12 @@ client waits until its own timeout with nothing to show for it."
                       "\"error\""
                       (mcp-server-lib-http-test--received proc)))
                    5))
-          ;; and the slot must be free again
+          ;; and the slot must be free again.  Guard against
+          ;; `seq-every-p' passing vacuously on an empty list --
+          ;; `(seq-every-p pred nil)' is t, so if `--server-conns'
+          ;; ever returned nil (name-prefix drift, teardown timing)
+          ;; the assertion below would prove nothing.
+          (should (mcp-server-lib-http-test--server-conns))
           (should (seq-every-p (lambda (p) (null (process-get p :request-active)))
                                (mcp-server-lib-http-test--server-conns))))
       (when (and proc (process-live-p proc)) (delete-process proc))
