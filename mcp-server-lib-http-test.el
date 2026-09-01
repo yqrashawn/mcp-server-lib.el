@@ -308,16 +308,21 @@ call holds the slot until the test hands it back."
 (ert-deftest mcp-server-lib-http-test-connection-death-cancels-deadline ()
   "Killing the connection must cancel the pending deadline timer.
 
-The deadline is deliberately far outside the wait bound below: a
+Identifies the specific deadline timer object rather than comparing
+`(length timer-list)': an unrelated ambient timer firing inside the wait
+window would satisfy a bare length comparison with no cancellation
+having happened at all, so a real regression could still pass.  The
+deadline is also deliberately far outside the wait bound below: a
 one-shot `run-at-time' self-removes from `timer-list' the moment it
-fires, so if the wait bound were close to the deadline, the timer count
-would drop on its own and the test would pass whether or not connection
+fires, so if the wait bound were close to the deadline, the timer would
+disappear on its own and the test would pass whether or not connection
 death actually cancels anything."
   (setq mcp-server-lib-http-test--callback nil)
   (let ((mcp-server-lib-http-port mcp-server-lib-http-test--port)
         (mcp-server-lib-http-async-timeout 30)
         (proc nil)
-        (timers-before nil))
+        (timers-before nil)
+        (deadline nil))
     (unwind-protect
         (progn
           (mcp-server-lib-register-tool
@@ -327,7 +332,7 @@ death actually cancels anything."
            :description "Test tool that answers only when the test releases it.")
           (mcp-server-lib-start)
           (mcp-server-lib-http-start :port mcp-server-lib-http-test--port)
-          (setq timers-before (length timer-list))
+          (setq timers-before (copy-sequence timer-list))
           (setq proc (mcp-server-lib-http-test--connect))
           (mcp-server-lib-http-test--send
            proc
@@ -335,10 +340,15 @@ death actually cancels anything."
                    "\"params\":{\"name\":\"slow_test_tool\",\"arguments\":{}}}"))
           (should (mcp-server-lib-http-test--wait
                    (lambda () mcp-server-lib-http-test--callback)))
-          (should (> (length timer-list) timers-before))
+          ;; Identify the one new timer object by reference (`eq'), not
+          ;; by counting: this is the deadline our request armed, and
+          ;; nothing else.
+          (let ((new-timers (seq-difference timer-list timers-before #'eq)))
+            (should (= 1 (length new-timers)))
+            (setq deadline (car new-timers)))
           (delete-process proc)
           (should (mcp-server-lib-http-test--wait
-                   (lambda () (<= (length timer-list) timers-before))
+                   (lambda () (not (memq deadline timer-list)))
                    5)))
       (when (and proc (process-live-p proc)) (delete-process proc))
       (when (and proc (buffer-live-p (process-buffer proc)))
@@ -387,7 +397,12 @@ already been bitten by twice."
               (+ 40 i)))
             (should (mcp-server-lib-http-test--wait
                      (lambda () mcp-server-lib-http-test--callback)))
-            ;; parked: our own sentinel is the installed one
+            ;; parked: our own sentinel is the installed one.  Guard
+            ;; against `seq-every-p' passing vacuously on an empty
+            ;; list -- `(seq-every-p pred nil)' is t, so if
+            ;; `--server-conns' ever returned nil (name-prefix drift,
+            ;; teardown timing) the assertion below would prove nothing.
+            (should (mcp-server-lib-http-test--server-conns))
             (should (seq-every-p
                      (lambda (p)
                        (not (eq (process-sentinel p) #'httpd--sentinel)))
@@ -401,7 +416,9 @@ already been bitten by twice."
                      (lambda ()
                        (= (1+ i)
                           (mcp-server-lib-http-test--response-count proc)))))
-            ;; answered: httpd's own sentinel is back, chain depth one
+            ;; answered: httpd's own sentinel is back, chain depth one.
+            ;; Same vacuous-pass guard as above.
+            (should (mcp-server-lib-http-test--server-conns))
             (should (seq-every-p
                      (lambda (p)
                        (eq (process-sentinel p) #'httpd--sentinel))
@@ -411,6 +428,69 @@ already been bitten by twice."
         (kill-buffer (process-buffer proc)))
       (ignore-errors (mcp-server-lib-http-stop))
       (ignore-errors (mcp-server-lib-unregister-tool "slow_test_tool"))
+      (ignore-errors (mcp-server-lib-stop)))))
+
+(defun mcp-server-lib-http-test--sync-answering-async-tool (callback)
+  "Async test tool that answers CALLBACK immediately, synchronously."
+  (funcall callback "immediate"))
+
+(ert-deftest mcp-server-lib-http-test-sync-answer-leaves-no-residue ()
+  "A tool that answers its async callback synchronously must not arm a
+deadline timer or leave a sentinel chained onto the connection.
+
+`mcp-server-lib--handle-tools-call-apply' returns `:async-pending'
+whenever a tool is registered `:async t', even when the handler calls
+its callback before `apply' returns -- the real answer is already on
+the wire by the time `dispatch-main-thread' reaches its `:async-pending'
+branch.  Without a guard there, that branch would still arm a deadline
+timer and chain a sentinel for a request that is already fully
+answered, and nothing would ever restore either: the real answer's own
+restore call already ran and no-opped, having found no sentinel
+installed yet.
+
+Looks for a timer whose remaining delay matches the timeout below,
+rather than asserting `timer-list' did not grow at all: batch Emacs can
+start unrelated timers of its own, and a bare growth check would be
+exactly the counting mistake fixed elsewhere in this file for
+`connection-death-cancels-deadline'.  A distinctive, non-round timeout
+value makes an accidental match with something ambient practically
+impossible."
+  (let ((mcp-server-lib-http-port mcp-server-lib-http-test--port)
+        (mcp-server-lib-http-async-timeout 87654.321)
+        (proc nil))
+    (unwind-protect
+        (progn
+          (mcp-server-lib-register-tool
+           #'mcp-server-lib-http-test--sync-answering-async-tool
+           :id "sync_test_tool"
+           :async t
+           :description "Test tool that answers its callback immediately.")
+          (mcp-server-lib-start)
+          (mcp-server-lib-http-start :port mcp-server-lib-http-test--port)
+          (setq proc (mcp-server-lib-http-test--connect))
+          (mcp-server-lib-http-test--send
+           proc
+           (concat "{\"jsonrpc\":\"2.0\",\"id\":50,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"sync_test_tool\",\"arguments\":{}}}"))
+          (should (mcp-server-lib-http-test--wait
+                   (lambda () (= 1 (mcp-server-lib-http-test--response-count proc)))))
+          (should-not
+           (seq-find
+            (lambda (tm)
+              (< (abs (- (float-time
+                          (time-subtract (timer--time tm) (current-time)))
+                         mcp-server-lib-http-async-timeout))
+                 5))
+            timer-list))
+          (should (mcp-server-lib-http-test--server-conns))
+          (should (seq-every-p
+                   (lambda (p) (eq (process-sentinel p) #'httpd--sentinel))
+                   (mcp-server-lib-http-test--server-conns))))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when (and proc (buffer-live-p (process-buffer proc)))
+        (kill-buffer (process-buffer proc)))
+      (ignore-errors (mcp-server-lib-http-stop))
+      (ignore-errors (mcp-server-lib-unregister-tool "sync_test_tool"))
       (ignore-errors (mcp-server-lib-stop)))))
 
 (provide 'mcp-server-lib-http-test)

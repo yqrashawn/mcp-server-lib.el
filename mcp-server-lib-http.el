@@ -211,6 +211,18 @@ the connection for every later request."
               (when deadline-timer
                 (cancel-timer deadline-timer)
                 (setq deadline-timer nil))
+              ;; Restore before send, not after: `httpd-send-header'
+              ;; releases `:request-active' and drains `:request-queue',
+              ;; which can hand this connection to a queued request.  If
+              ;; that request's own `:async-pending' setup ran before we
+              ;; restored, it would read our sentinel as still installed,
+              ;; capture it as its own `prev', and chain onto it --
+              ;; `--restore-sentinel''s ownership check would then see
+              ;; someone else's sentinel in place and correctly refuse to
+              ;; touch it, permanently leaking this link instead of losing
+              ;; a cancellation.  Restoring first closes that window
+              ;; unconditionally, regardless of how or when the send that
+              ;; follows hands the connection off.
               (mcp-server-lib-http--restore-sentinel
                proc own-sentinel prev-sentinel)
               (if (not (process-live-p proc))
@@ -232,36 +244,50 @@ the connection for every later request."
            ;; Async tool - the callback sends the response later.  Write
            ;; nothing now: no headers, no chunked framing, no keepalive.
            ((eq response :async-pending)
-            (setq deadline-timer
-                  (run-at-time
-                   mcp-server-lib-http-async-timeout nil
-                   (lambda ()
-                     (setq deadline-timer nil)
-                     (unless response-sent
-                       (setq response-sent t)
-                       (message
-                        "[MCP HTTP] Async deadline reached after %ss"
-                        mcp-server-lib-http-async-timeout)
-                       (mcp-server-lib-http--restore-sentinel
-                        proc own-sentinel prev-sentinel)
-                       (when (process-live-p proc)
-                         (ignore-errors
-                           (mcp-server-lib-http--send-error
-                            proc 504
-                            (format "Async operation timeout (%ss)"
-                                    mcp-server-lib-http-async-timeout))))))))
-            (setq prev-sentinel (process-sentinel proc)
-                  own-sentinel
-                  (lambda (p event)
-                    (unless (string-prefix-p "open " event)
-                      (when deadline-timer
-                        (cancel-timer deadline-timer)
-                        (setq deadline-timer nil))
-                      (setq response-sent t)
-                      (mcp-server-lib-http--restore-sentinel
-                       proc own-sentinel prev-sentinel))
-                    (when prev-sentinel (funcall prev-sentinel p event))))
-            (set-process-sentinel proc own-sentinel))
+            ;; `mcp-server-lib-process-jsonrpc' can invoke the async
+            ;; callback synchronously, before this branch ever runs (a
+            ;; handler that answers immediately still returns
+            ;; `:async-pending' to its caller).  When that happens
+            ;; `response-sent' is already t here, and arming a 49-hour
+            ;; timer plus chaining a sentinel that nothing will ever
+            ;; restore would reintroduce the leak the guard above exists
+            ;; to close, just on a narrower trigger.  Skip both.
+            (unless response-sent
+              (setq deadline-timer
+                    (run-at-time
+                     mcp-server-lib-http-async-timeout nil
+                     (lambda ()
+                       (setq deadline-timer nil)
+                       (unless response-sent
+                         (setq response-sent t)
+                         (message
+                          "[MCP HTTP] Async deadline reached after %ss"
+                          mcp-server-lib-http-async-timeout)
+                         ;; Same ordering requirement as the callback
+                         ;; path above: restore before the send-error
+                         ;; below, so a request the send's queue-drain
+                         ;; hands this connection to can never capture
+                         ;; our sentinel as its own `prev'.
+                         (mcp-server-lib-http--restore-sentinel
+                          proc own-sentinel prev-sentinel)
+                         (when (process-live-p proc)
+                           (ignore-errors
+                             (mcp-server-lib-http--send-error
+                              proc 504
+                              (format "Async operation timeout (%ss)"
+                                      mcp-server-lib-http-async-timeout))))))))
+              (setq prev-sentinel (process-sentinel proc)
+                    own-sentinel
+                    (lambda (p event)
+                      (unless (string-prefix-p "open " event)
+                        (when deadline-timer
+                          (cancel-timer deadline-timer)
+                          (setq deadline-timer nil))
+                        (setq response-sent t)
+                        (mcp-server-lib-http--restore-sentinel
+                         proc own-sentinel prev-sentinel))
+                      (when prev-sentinel (funcall prev-sentinel p event))))
+              (set-process-sentinel proc own-sentinel)))
            ;; Normal response
            (response
             (unless response-sent
