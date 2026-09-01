@@ -81,6 +81,20 @@ Uses `mcp-server-lib-log-directory' for the directory."
   :type 'string
   :group 'mcp-server-lib-http)
 
+(defcustom mcp-server-lib-http-async-timeout 176400
+  "Seconds to wait for an async tool's callback over the HTTP transport.
+
+Deliberately separate from `mcp-server-lib-async-timeout', which governs
+the stdio transport's blocking poll; the two want very different numbers.
+On expiry the request is answered with a JSON-RPC error, which releases
+`simple-httpd''s per-connection slot and lets queued requests through.
+
+The default is 49 hours: long enough that a human question outlives
+cchp's own 48-hour ceiling, so cchp reports the timeout rather than
+Emacs.  One idle file descriptor is the entire cost of a long value."
+  :type 'number
+  :group 'mcp-server-lib-http)
+
 ;;; HTTP file logger
 
 (defvar mcp-server-lib-http-logger (lgr-get-logger "mcp-server-lib-http")
@@ -161,10 +175,14 @@ the connection for every later request."
   (let* ((mcp-server-lib--request-session-id sid)
          (mcp-server-lib--request-cwd dir)
          (response-sent nil)
+         (deadline-timer nil)
          (mcp-server-lib--async-response-fn
           (lambda (response)
             (mcp-server-lib-http--log "Async response: %s" response)
             (setq response-sent t)
+            (when deadline-timer
+              (cancel-timer deadline-timer)
+              (setq deadline-timer nil))
             (if (not (process-live-p proc))
                 (message
                  "[MCP HTTP] Cannot send async response: connection dead (status: %s)"
@@ -183,7 +201,23 @@ the connection for every later request."
           (cond
            ;; Async tool - the callback sends the response later.  Write
            ;; nothing now: no headers, no chunked framing, no keepalive.
-           ((eq response :async-pending) nil)
+           ((eq response :async-pending)
+            (setq deadline-timer
+                  (run-at-time
+                   mcp-server-lib-http-async-timeout nil
+                   (lambda ()
+                     (setq deadline-timer nil)
+                     (unless response-sent
+                       (setq response-sent t)
+                       (message
+                        "[MCP HTTP] Async deadline reached after %ss"
+                        mcp-server-lib-http-async-timeout)
+                       (when (process-live-p proc)
+                         (ignore-errors
+                           (mcp-server-lib-http--send-error
+                            proc 504
+                            (format "Async operation timeout (%ss)"
+                                    mcp-server-lib-http-async-timeout)))))))))
            ;; Normal response
            (response
             (unless response-sent

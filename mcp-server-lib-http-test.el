@@ -160,5 +160,48 @@ request, issued during the wait, that is never dispatched."
       (ignore-errors (mcp-server-lib-unregister-tool "slow_test_tool"))
       (ignore-errors (mcp-server-lib-stop)))))
 
+(defun mcp-server-lib-http-test--abandon-tool (_callback)
+  "Async test tool that never calls its callback."
+  nil)
+
+(ert-deftest mcp-server-lib-http-test-deadline-answers-abandoned-call ()
+  "An async callback that never fires must still produce a response.
+
+Without a deadline the request holds `:request-active' forever and the
+client waits until its own timeout with nothing to show for it."
+  (let ((mcp-server-lib-http-port mcp-server-lib-http-test--port)
+        (mcp-server-lib-http-async-timeout 1)
+        (proc nil))
+    (unwind-protect
+        (progn
+          (mcp-server-lib-register-tool
+           #'mcp-server-lib-http-test--abandon-tool
+           :id "abandon_test_tool"
+           :async t
+           :description "Test tool that never answers.")
+          (mcp-server-lib-start)
+          (mcp-server-lib-http-start :port mcp-server-lib-http-test--port)
+          (setq proc (mcp-server-lib-http-test--connect))
+          (mcp-server-lib-http-test--send
+           proc
+           (concat "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"abandon_test_tool\",\"arguments\":{}}}"))
+          ;; the deadline, not the tool, must answer
+          (should (mcp-server-lib-http-test--wait
+                   (lambda ()
+                     (string-match-p
+                      "\"error\""
+                      (mcp-server-lib-http-test--received proc)))
+                   5))
+          ;; and the slot must be free again
+          (should (seq-every-p (lambda (p) (null (process-get p :request-active)))
+                               (mcp-server-lib-http-test--server-conns))))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when (and proc (buffer-live-p (process-buffer proc)))
+        (kill-buffer (process-buffer proc)))
+      (ignore-errors (mcp-server-lib-http-stop))
+      (ignore-errors (mcp-server-lib-unregister-tool "abandon_test_tool"))
+      (ignore-errors (mcp-server-lib-stop)))))
+
 (provide 'mcp-server-lib-http-test)
 ;;; mcp-server-lib-http-test.el ends here
