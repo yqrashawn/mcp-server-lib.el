@@ -66,6 +66,17 @@
       (setq n (1+ n) i (match-end 0)))
     n))
 
+(defun mcp-server-lib-http-test--nth-response (proc n)
+  "Return the raw text of the Nth (1-indexed) HTTP response received on PROC."
+  (let* ((s (mcp-server-lib-http-test--received proc))
+         (starts nil)
+         (i 0))
+    (while (string-match "HTTP/1\\.1 " s i)
+      (push (match-beginning 0) starts)
+      (setq i (match-end 0)))
+    (setq starts (nreverse starts))
+    (substring s (nth (1- n) starts) (or (nth n starts) (length s)))))
+
 (defun mcp-server-lib-http-test--server-conns ()
   "Return the httpd client connection processes."
   (seq-filter (lambda (p) (string-prefix-p "httpd <" (process-name p)))
@@ -201,6 +212,139 @@ client waits until its own timeout with nothing to show for it."
         (kill-buffer (process-buffer proc)))
       (ignore-errors (mcp-server-lib-http-stop))
       (ignore-errors (mcp-server-lib-unregister-tool "abandon_test_tool"))
+      (ignore-errors (mcp-server-lib-stop)))))
+
+(ert-deftest mcp-server-lib-http-test-late-answer-is-dropped ()
+  "A callback firing after the deadline must not answer someone else's request.
+
+`httpd-send-header' already refuses to write once `:request-active' is
+nil, so a late answer landing on an *idle* connection is harmless and
+proves nothing -- it passes with or without the guard.  The hazard is a
+late answer landing while the connection is serving a *different*
+request: `:request-active' is non-nil again, for the new request, so
+`httpd-send-header' writes -- delivering request 9's payload as the
+reply to request 33 and clearing request 33's slot, which then strands
+request 33 with no answer at all.
+
+The slot-holder is a second *async* call, and that is load-bearing.  A
+synchronous method claims and releases the slot inside two back-to-back
+`run-at-time 0' ticks (`httpd--pop-request' defers the dispatch, and
+`mcp-server-lib-http--handle-jsonrpc-request' defers POST again), so the
+window is too narrow to act in: a `tools/list' slot-holder lost that
+race once in twelve runs even with the guard in place.  A parked async
+call holds the slot until the test hands it back."
+  (setq mcp-server-lib-http-test--callback nil)
+  (let ((mcp-server-lib-http-port mcp-server-lib-http-test--port)
+        (mcp-server-lib-http-async-timeout 1)
+        (proc nil)
+        (late-callback nil))
+    (unwind-protect
+        (progn
+          (mcp-server-lib-register-tool
+           #'mcp-server-lib-http-test--slow-tool
+           :id "slow_test_tool"
+           :async t
+           :description "Test tool that answers only when the test releases it.")
+          (mcp-server-lib-start)
+          (mcp-server-lib-http-start :port mcp-server-lib-http-test--port)
+          (setq proc (mcp-server-lib-http-test--connect))
+          ;; request 9: async, and deliberately abandoned past its deadline
+          (mcp-server-lib-http-test--send
+           proc
+           (concat "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"slow_test_tool\",\"arguments\":{}}}"))
+          (should (mcp-server-lib-http-test--wait
+                   (lambda () mcp-server-lib-http-test--callback)))
+          (setq late-callback mcp-server-lib-http-test--callback)
+          ;; the deadline answers request 9 and releases the slot
+          (should (mcp-server-lib-http-test--wait
+                   (lambda ()
+                     (string-match-p "\"error\""
+                                     (mcp-server-lib-http-test--received proc)))
+                   5))
+          (should (= 1 (mcp-server-lib-http-test--response-count proc)))
+          ;; request 33 takes the slot and parks, holding it while we act
+          (let ((mcp-server-lib-http-async-timeout 30))
+            (setq mcp-server-lib-http-test--callback nil)
+            (mcp-server-lib-http-test--send
+             proc
+             (concat "{\"jsonrpc\":\"2.0\",\"id\":33,\"method\":\"tools/call\","
+                     "\"params\":{\"name\":\"slow_test_tool\",\"arguments\":{}}}"))
+            (should (mcp-server-lib-http-test--wait
+                     (lambda () mcp-server-lib-http-test--callback)))
+            (should (seq-some (lambda (p) (process-get p :request-active))
+                              (mcp-server-lib-http-test--server-conns)))
+            ;; request 9 answers now, far too late, onto request 33's slot
+            (funcall late-callback
+                     (json-encode
+                      '((jsonrpc . "2.0") (id . 9)
+                        (result . ((content . [((type . "text")
+                                                (text . "late"))]))))))
+            ;; wait for the second response the guard has to prevent
+            (mcp-server-lib-http-test--wait
+             (lambda () (> (mcp-server-lib-http-test--response-count proc) 1))
+             1)
+            (should (= 1 (mcp-server-lib-http-test--response-count proc)))
+            ;; and request 33 must still get its own answer, uncorrupted
+            (funcall mcp-server-lib-http-test--callback
+                     (json-encode
+                      '((jsonrpc . "2.0") (id . 33)
+                        (result . ((content . [((type . "text")
+                                                (text . "own-answer"))]))))))
+            (should (mcp-server-lib-http-test--wait
+                     (lambda ()
+                       (= 2 (mcp-server-lib-http-test--response-count proc)))))
+            (let ((second-response
+                   (mcp-server-lib-http-test--nth-response proc 2)))
+              (should (string-match-p "own-answer" second-response))
+              (should-not (string-match-p "late" second-response)))))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when (and proc (buffer-live-p (process-buffer proc)))
+        (kill-buffer (process-buffer proc)))
+      (ignore-errors (mcp-server-lib-http-stop))
+      (ignore-errors (mcp-server-lib-unregister-tool "slow_test_tool"))
+      (ignore-errors (mcp-server-lib-stop)))))
+
+(ert-deftest mcp-server-lib-http-test-connection-death-cancels-deadline ()
+  "Killing the connection must cancel the pending deadline timer.
+
+The deadline is deliberately far outside the wait bound below: a
+one-shot `run-at-time' self-removes from `timer-list' the moment it
+fires, so if the wait bound were close to the deadline, the timer count
+would drop on its own and the test would pass whether or not connection
+death actually cancels anything."
+  (setq mcp-server-lib-http-test--callback nil)
+  (let ((mcp-server-lib-http-port mcp-server-lib-http-test--port)
+        (mcp-server-lib-http-async-timeout 30)
+        (proc nil)
+        (timers-before nil))
+    (unwind-protect
+        (progn
+          (mcp-server-lib-register-tool
+           #'mcp-server-lib-http-test--slow-tool
+           :id "slow_test_tool"
+           :async t
+           :description "Test tool that answers only when the test releases it.")
+          (mcp-server-lib-start)
+          (mcp-server-lib-http-start :port mcp-server-lib-http-test--port)
+          (setq timers-before (length timer-list))
+          (setq proc (mcp-server-lib-http-test--connect))
+          (mcp-server-lib-http-test--send
+           proc
+           (concat "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"slow_test_tool\",\"arguments\":{}}}"))
+          (should (mcp-server-lib-http-test--wait
+                   (lambda () mcp-server-lib-http-test--callback)))
+          (should (> (length timer-list) timers-before))
+          (delete-process proc)
+          (should (mcp-server-lib-http-test--wait
+                   (lambda () (<= (length timer-list) timers-before))
+                   5)))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when (and proc (buffer-live-p (process-buffer proc)))
+        (kill-buffer (process-buffer proc)))
+      (ignore-errors (mcp-server-lib-http-stop))
+      (ignore-errors (mcp-server-lib-unregister-tool "slow_test_tool"))
       (ignore-errors (mcp-server-lib-stop)))))
 
 (provide 'mcp-server-lib-http-test)

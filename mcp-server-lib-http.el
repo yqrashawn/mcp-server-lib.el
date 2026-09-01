@@ -178,24 +178,30 @@ the connection for every later request."
          (deadline-timer nil)
          (mcp-server-lib--async-response-fn
           (lambda (response)
-            (mcp-server-lib-http--log "Async response: %s" response)
-            (setq response-sent t)
-            (when deadline-timer
-              (cancel-timer deadline-timer)
-              (setq deadline-timer nil))
-            (if (not (process-live-p proc))
+            (if response-sent
+                ;; The deadline already answered this request and
+                ;; `httpd-send-header' has released the slot; writing now
+                ;; raises "No active request".  Drop the late answer.
                 (message
-                 "[MCP HTTP] Cannot send async response: connection dead (status: %s)"
-                 (process-status proc))
-              (condition-case err
-                  (if response
-                      (mcp-server-lib-http--send-response proc response)
-                    (with-temp-buffer
-                      (httpd-send-header proc "text/plain" 202)))
-                (error
-                 (message
-                  "[MCP HTTP] Error sending async response: %s"
-                  (error-message-string err))))))))
+                 "[MCP HTTP] Dropping late async response; already answered")
+              (mcp-server-lib-http--log "Async response: %s" response)
+              (setq response-sent t)
+              (when deadline-timer
+                (cancel-timer deadline-timer)
+                (setq deadline-timer nil))
+              (if (not (process-live-p proc))
+                  (message
+                   "[MCP HTTP] Cannot send async response: connection dead (status: %s)"
+                   (process-status proc))
+                (condition-case err
+                    (if response
+                        (mcp-server-lib-http--send-response proc response)
+                      (with-temp-buffer
+                        (httpd-send-header proc "text/plain" 202)))
+                  (error
+                   (message
+                    "[MCP HTTP] Error sending async response: %s"
+                    (error-message-string err)))))))))
     (condition-case err
         (let ((response (mcp-server-lib-process-jsonrpc body)))
           (cond
@@ -217,7 +223,17 @@ the connection for every later request."
                            (mcp-server-lib-http--send-error
                             proc 504
                             (format "Async operation timeout (%ss)"
-                                    mcp-server-lib-http-async-timeout)))))))))
+                                    mcp-server-lib-http-async-timeout))))))))
+            (let ((prev-sentinel (process-sentinel proc)))
+              (set-process-sentinel
+               proc
+               (lambda (p event)
+                 (unless (string-prefix-p "open " event)
+                   (when deadline-timer
+                     (cancel-timer deadline-timer)
+                     (setq deadline-timer nil))
+                   (setq response-sent t))
+                 (when prev-sentinel (funcall prev-sentinel p event))))))
            ;; Normal response
            (response
             (unless response-sent
