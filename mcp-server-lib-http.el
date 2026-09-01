@@ -148,79 +148,42 @@ Returns the tool name string, or nil if not a tools/call or on parse error."
 
 (defun mcp-server-lib-http--dispatch-main-thread (proc body sid dir)
   "Process JSON-RPC BODY on the main thread.
-Used for interactive tools that need `recursive-edit' and non-tool
-requests.  PROC is the HTTP connection process.  SID and DIR are
-the session-id and working directory."
+PROC is the HTTP connection process.  SID and DIR are the session-id
+and working directory.
+
+An async tool's response is delayed, not streamed: nothing is written
+until the callback fires, and then it goes out through
+`mcp-server-lib-http--send-response' like any other response.  That
+matters because `httpd-send-header' is the only thing that clears
+`simple-httpd''s per-connection `:request-active' slot and drains
+`:request-queue'; writing the response by hand leaks the slot and wedges
+the connection for every later request."
   (let* ((mcp-server-lib--request-session-id sid)
          (mcp-server-lib--request-cwd dir)
          (response-sent nil)
-         (chunked-mode nil)
-         (keepalive-timer nil)
          (mcp-server-lib--async-response-fn
           (lambda (response)
             (mcp-server-lib-http--log "Async response: %s" response)
             (setq response-sent t)
-            (when keepalive-timer
-              (cancel-timer keepalive-timer)
-              (setq keepalive-timer nil))
-            (let ((proc-status (process-status proc))
-                  (resp-len (and response (length response))))
-              (message "[MCP HTTP] Async callback: proc=%s resp-len=%s chunked=%s"
-                       proc-status resp-len chunked-mode)
-              (if (not (process-live-p proc))
-                  (message "[MCP HTTP] Cannot send async response: connection dead (status: %s)"
-                           proc-status)
-                (condition-case err
-                    (progn
-                      (if chunked-mode
-                          (if response
-                              (let ((len (string-bytes response)))
-                                (process-send-string
-                                 proc (format "%x\r\n%s\r\n0\r\n\r\n" len response)))
-                            (process-send-string proc "0\r\n\r\n"))
-                        (if response
-                            (mcp-server-lib-http--send-response proc response)
-                          (with-temp-buffer
-                            (httpd-send-header proc "text/plain" 202))))
-                      (message "[MCP HTTP] Async response sent successfully (%s bytes)"
-                               resp-len))
-                  (error
-                   (message "[MCP HTTP] Error sending async response: %s"
-                            (error-message-string err)))))))))
+            (if (not (process-live-p proc))
+                (message
+                 "[MCP HTTP] Cannot send async response: connection dead (status: %s)"
+                 (process-status proc))
+              (condition-case err
+                  (if response
+                      (mcp-server-lib-http--send-response proc response)
+                    (with-temp-buffer
+                      (httpd-send-header proc "text/plain" 202)))
+                (error
+                 (message
+                  "[MCP HTTP] Error sending async response: %s"
+                  (error-message-string err))))))))
     (condition-case err
         (let ((response (mcp-server-lib-process-jsonrpc body)))
           (cond
-           ;; Async tool - response will be sent by callback
-           ((eq response :async-pending)
-            (unless response-sent
-              (setq chunked-mode t)
-              (condition-case err2
-                  (progn
-                    (process-send-string
-                     proc
-                     (concat
-                      "HTTP/1.1 200 OK\r\n"
-                      "Content-Type: application/json\r\n"
-                      "Transfer-Encoding: chunked\r\n"
-                      "Connection: keep-alive\r\n"
-                      "Access-Control-Allow-Origin: *\r\n"
-                      "\r\n"))
-                    (setq keepalive-timer
-                          (run-at-time
-                           15 15
-                           (lambda ()
-                             (if (process-live-p proc)
-                                 (ignore-errors
-                                   (process-send-string
-                                    proc "1\r\n \r\n"))
-                               (message "[MCP HTTP] Keepalive: proc died mid-wait (status: %s)"
-                                        (process-status proc))
-                               (when keepalive-timer
-                                 (cancel-timer keepalive-timer)
-                                 (setq keepalive-timer nil)))))))
-                (error
-                 (message "[MCP HTTP] Error starting chunked stream: %s"
-                          (error-message-string err2))))))
+           ;; Async tool - the callback sends the response later.  Write
+           ;; nothing now: no headers, no chunked framing, no keepalive.
+           ((eq response :async-pending) nil)
            ;; Normal response
            (response
             (unless response-sent

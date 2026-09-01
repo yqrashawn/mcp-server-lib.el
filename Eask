@@ -14,7 +14,7 @@
        "mcp-server-lib-ert.el"
        "emacs-mcp-stdio.sh")
 
-(script "test" "eask test ert mcp-server-lib-test.el")
+(script "test" "eask test ert mcp-server-lib-http-test.el && eask test ert mcp-server-lib-test.el")
 
 (script "org-lint" 
         (concat "emacs -Q --batch "
