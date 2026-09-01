@@ -347,5 +347,71 @@ death actually cancels anything."
       (ignore-errors (mcp-server-lib-unregister-tool "slow_test_tool"))
       (ignore-errors (mcp-server-lib-stop)))))
 
+(ert-deftest mcp-server-lib-http-test-sentinel-restored-after-async ()
+  "A finished async request must leave the connection's sentinel as it found it.
+
+Every async request chains a sentinel onto the connection so that
+connection death cancels its deadline.  Nothing used to remove the
+previous one, so a keep-alive connection gained a link per async request
+for its whole life -- measured at six installs over five sequential
+calls on one connection, each lambda wrapping the last and all of them
+firing nested on disconnect.  Asserting that `httpd--sentinel' is back
+in place once a request completes pins the chain at depth one.
+
+Two requests, not one, and a check *while* each is parked: without the
+mid-flight check a version that installed no sentinel at all would also
+pass the final assertion, which is the vacuous shape this suite has
+already been bitten by twice."
+  (setq mcp-server-lib-http-test--callback nil)
+  (let ((mcp-server-lib-http-port mcp-server-lib-http-test--port)
+        (mcp-server-lib-http-async-timeout 30)
+        (proc nil))
+    (unwind-protect
+        (progn
+          (mcp-server-lib-register-tool
+           #'mcp-server-lib-http-test--slow-tool
+           :id "slow_test_tool"
+           :async t
+           :description "Test tool that answers only when the test releases it.")
+          (mcp-server-lib-start)
+          (mcp-server-lib-http-start :port mcp-server-lib-http-test--port)
+          (setq proc (mcp-server-lib-http-test--connect))
+          ;; two sequential async calls down one keep-alive connection
+          (dotimes (i 2)
+            (setq mcp-server-lib-http-test--callback nil)
+            (mcp-server-lib-http-test--send
+             proc
+             (format
+              (concat "{\"jsonrpc\":\"2.0\",\"id\":%d,\"method\":\"tools/call\","
+                      "\"params\":{\"name\":\"slow_test_tool\",\"arguments\":{}}}")
+              (+ 40 i)))
+            (should (mcp-server-lib-http-test--wait
+                     (lambda () mcp-server-lib-http-test--callback)))
+            ;; parked: our own sentinel is the installed one
+            (should (seq-every-p
+                     (lambda (p)
+                       (not (eq (process-sentinel p) #'httpd--sentinel)))
+                     (mcp-server-lib-http-test--server-conns)))
+            (funcall mcp-server-lib-http-test--callback
+                     (json-encode
+                      `((jsonrpc . "2.0") (id . ,(+ 40 i))
+                        (result . ((content . [((type . "text")
+                                                (text . "done"))]))))))
+            (should (mcp-server-lib-http-test--wait
+                     (lambda ()
+                       (= (1+ i)
+                          (mcp-server-lib-http-test--response-count proc)))))
+            ;; answered: httpd's own sentinel is back, chain depth one
+            (should (seq-every-p
+                     (lambda (p)
+                       (eq (process-sentinel p) #'httpd--sentinel))
+                     (mcp-server-lib-http-test--server-conns)))))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when (and proc (buffer-live-p (process-buffer proc)))
+        (kill-buffer (process-buffer proc)))
+      (ignore-errors (mcp-server-lib-http-stop))
+      (ignore-errors (mcp-server-lib-unregister-tool "slow_test_tool"))
+      (ignore-errors (mcp-server-lib-stop)))))
+
 (provide 'mcp-server-lib-http-test)
 ;;; mcp-server-lib-http-test.el ends here

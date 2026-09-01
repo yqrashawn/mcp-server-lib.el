@@ -160,6 +160,18 @@ Returns the tool name string, or nil if not a tools/call or on parse error."
           (alist-get 'name params)))
     (error nil)))
 
+(defun mcp-server-lib-http--restore-sentinel (proc own prev)
+  "Restore PREV as PROC's sentinel, but only if OWN is still installed.
+Every async request chains a sentinel onto PROC so that connection death
+cancels its deadline.  Restoring it when the request ends keeps that
+chain one link deep; without the restore a keep-alive connection gains a
+link per async request for its whole life, since nothing ever removed
+the previous one.  If PROC's sentinel is no longer OWN then something
+else has chained onto it since, and that chain owns the restore -- leave
+it alone rather than clobbering it."
+  (when (and own (eq (process-sentinel proc) own))
+    (set-process-sentinel proc prev)))
+
 (defun mcp-server-lib-http--dispatch-main-thread (proc body sid dir)
   "Process JSON-RPC BODY on the main thread.
 PROC is the HTTP connection process.  SID and DIR are the session-id
@@ -176,19 +188,31 @@ the connection for every later request."
          (mcp-server-lib--request-cwd dir)
          (response-sent nil)
          (deadline-timer nil)
+         (prev-sentinel nil)
+         (own-sentinel nil)
          (mcp-server-lib--async-response-fn
           (lambda (response)
             (if response-sent
-                ;; The deadline already answered this request and
-                ;; `httpd-send-header' has released the slot; writing now
-                ;; raises "No active request".  Drop the late answer.
-                (message
-                 "[MCP HTTP] Dropping late async response; already answered")
+                ;; This request is already over -- the deadline answered
+                ;; it, or the connection died.  Either way its slot is
+                ;; released, so `httpd-send-header' would raise "No active
+                ;; request", or worse, write onto a *later* request's
+                ;; slot.  Drop the answer, and name the actual cause: a
+                ;; dropped answer is a prompt the user typed into that
+                ;; went nowhere, so the reason must not be guessed at.
+                (if (process-live-p proc)
+                    (message
+                     "[MCP HTTP] Dropping late async response; already answered")
+                  (message
+                   "[MCP HTTP] Dropping late async response; connection died (status: %s)"
+                   (process-status proc)))
               (mcp-server-lib-http--log "Async response: %s" response)
               (setq response-sent t)
               (when deadline-timer
                 (cancel-timer deadline-timer)
                 (setq deadline-timer nil))
+              (mcp-server-lib-http--restore-sentinel
+               proc own-sentinel prev-sentinel)
               (if (not (process-live-p proc))
                   (message
                    "[MCP HTTP] Cannot send async response: connection dead (status: %s)"
@@ -218,22 +242,26 @@ the connection for every later request."
                        (message
                         "[MCP HTTP] Async deadline reached after %ss"
                         mcp-server-lib-http-async-timeout)
+                       (mcp-server-lib-http--restore-sentinel
+                        proc own-sentinel prev-sentinel)
                        (when (process-live-p proc)
                          (ignore-errors
                            (mcp-server-lib-http--send-error
                             proc 504
                             (format "Async operation timeout (%ss)"
                                     mcp-server-lib-http-async-timeout))))))))
-            (let ((prev-sentinel (process-sentinel proc)))
-              (set-process-sentinel
-               proc
-               (lambda (p event)
-                 (unless (string-prefix-p "open " event)
-                   (when deadline-timer
-                     (cancel-timer deadline-timer)
-                     (setq deadline-timer nil))
-                   (setq response-sent t))
-                 (when prev-sentinel (funcall prev-sentinel p event))))))
+            (setq prev-sentinel (process-sentinel proc)
+                  own-sentinel
+                  (lambda (p event)
+                    (unless (string-prefix-p "open " event)
+                      (when deadline-timer
+                        (cancel-timer deadline-timer)
+                        (setq deadline-timer nil))
+                      (setq response-sent t)
+                      (mcp-server-lib-http--restore-sentinel
+                       proc own-sentinel prev-sentinel))
+                    (when prev-sentinel (funcall prev-sentinel p event))))
+            (set-process-sentinel proc own-sentinel))
            ;; Normal response
            (response
             (unless response-sent
