@@ -15,7 +15,12 @@
        "mcp-server-lib-http.el"
        "emacs-mcp-stdio.sh")
 
-(script "test" "eask test ert mcp-server-lib-http-test.el && eask test ert mcp-server-lib-test.el")
+;; Run both suites unconditionally -- `mcp-server-lib-test.el' fails to
+;; parse on main (pre-existing, unrelated to the http transport), and
+;; with `&&' a flake in the http suite skipped it outright, so its own
+;; JUnit report was never even attempted.  `;' always attempts both;
+;; the trailing `test' reports failure if either did.
+(script "test" "eask test ert mcp-server-lib-http-test.el; s1=$?; eask test ert mcp-server-lib-test.el; s2=$?; test \"$s1\" -eq 0 -a \"$s2\" -eq 0")
 
 (script "org-lint" 
         (concat "emacs -Q --batch "
@@ -40,4 +45,4 @@
 (depends-on "gptel" "0.9")
 (depends-on "dash" "2.20.0")
 (depends-on "lgr" "0")
-(depends-on "simple-httpd" "1.5.1")
+(depends-on "simple-httpd" "1.6")

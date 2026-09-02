@@ -5,7 +5,7 @@
 ;; Author: Laurynas Biveinis <laurynas.biveinis@gmail.com>
 ;; Keywords: comm, tools
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1") (mcp-server-lib "0.2.0") (simple-httpd "1.5.1"))
+;; Package-Requires: ((emacs "27.1") (mcp-server-lib "0.2.0") (dash "2.20.0") (lgr "0") (simple-httpd "1.6"))
 
 ;; This file is NOT part of GNU Emacs.
 
@@ -46,6 +46,7 @@
 (require 'simple-httpd)
 (require 'json)
 (require 'lgr)
+(require 'dash)
 
 ;;; Customization
 
@@ -81,24 +82,30 @@ Uses `mcp-server-lib-log-directory' for the directory."
   :type 'string
   :group 'mcp-server-lib-http)
 
-(defcustom mcp-server-lib-http-async-timeout 176400
+(defcustom mcp-server-lib-http-async-timeout 300
   "Seconds to wait for an async tool's callback over the HTTP transport.
 
-Deliberately separate from `mcp-server-lib-async-timeout', which governs
-the stdio transport's blocking poll; the two want very different numbers.
-On expiry the request is answered with a JSON-RPC error, which releases
+Deliberately a separate variable from `mcp-server-lib-async-timeout',
+which governs the stdio transport's blocking poll, so the two transports
+can be tuned independently; the default matches it here because nothing
+about the HTTP path argues for a different number out of the box.  On
+expiry the request is answered with a JSON-RPC error, which releases
 `simple-httpd''s per-connection slot and lets queued requests through.
 
 This is also the longest a keep-alive connection can be blocked: until
 that release, `simple-httpd' won't dispatch anything else queued behind
 this request on the same connection (see
-`mcp-server-lib-http--dispatch-main-thread').  A larger value trades a
-longer worst-case stall on that connection for more room for a slow
-async op to finish on its own.
-
-The default is 49 hours: long enough that a human question outlives
-cchp's own 48-hour ceiling, so cchp reports the timeout rather than
-Emacs.  One idle file descriptor is the entire cost of a long value."
+`mcp-server-lib-http--dispatch-main-thread').  Raising this value is not
+merely holding one idle file descriptor open for longer -- it directly
+extends that worst-case stall on every later request queued behind this
+one.  It can also defeat itself: a client with its own, shorter read
+timeout gives up and closes the socket before this deadline ever fires,
+so the caller sees a raw connection failure instead of the JSON-RPC
+timeout error this variable exists to produce.  A deployment that
+genuinely needs a long wait -- a tool that pauses for a human, say --
+should raise this in its own configuration, matched to that client's own
+timeout, rather than the library defaulting to one deployment's number
+for everyone."
   :type 'number
   :group 'mcp-server-lib-http)
 
@@ -134,20 +141,33 @@ Logs to `*Messages*' and to a rotating log file."
       (message "[MCP HTTP] %s" formatted)
       (lgr-debug mcp-server-lib-http-logger "%s" formatted))))
 
-(defun mcp-server-lib-http--send-error (proc code message &optional id)
-  "Send error response with CODE and MESSAGE to PROC.
-ID is the originating request's JSON-RPC id, when it is known.  Per the
-JSON-RPC 2.0 spec it must be :null when the request never parsed far
-enough to have one (e.g. a parse error); callers with no id simply omit
-this argument and get that default."
+(defconst mcp-server-lib-http-jsonrpc-error-timeout -32000
+  "JSON-RPC 2.0 error code for a request the async deadline abandoned.
+In the implementation-defined server-error range the spec reserves
+\(-32000 to -32099\), and distinct from
+`mcp-server-lib-jsonrpc-error-internal' so a client can tell a timed-out
+async call apart from a handler crash by code alone, not just by the
+human-readable message text.")
+
+(defun mcp-server-lib-http--send-error (proc http-status jsonrpc-code message &optional id)
+  "Send a JSON-RPC error response to PROC.
+HTTP-STATUS is the HTTP status code for the response.  JSONRPC-CODE is
+the JSON-RPC 2.0 error code for the body -- callers choose it explicitly
+so a deadline, a crash, and a malformed request no longer collapse onto
+the same hardcoded code and become indistinguishable to a client.
+MESSAGE is the human-readable error text.  ID is the originating
+request's JSON-RPC id, when it is known.  Per the JSON-RPC 2.0 spec it
+must be :null when the request never parsed far enough to have one
+\(e.g. a parse error\); callers with no id simply omit this argument
+and get that default."
   (with-temp-buffer
     (insert
      (json-encode
       `((jsonrpc . "2.0")
         (id . ,(or id :null))
-        (error . ((code . -32603)
+        (error . ((code . ,jsonrpc-code)
                   (message . ,message))))))
-    (httpd-send-header proc "application/json" code
+    (httpd-send-header proc "application/json" http-status
                        :Access-Control-Allow-Origin "*")))
 
 (defun mcp-server-lib-http--send-response (proc response-text)
@@ -238,8 +258,8 @@ the ways around the stall; an early release here is not."
                   (message
                    "[MCP HTTP] Dropping late async response; connection died (status: %s)"
                    (process-status proc)))
-              (mcp-server-lib-http--log "Async response: %s" response)
               (setq response-sent t)
+              (mcp-server-lib-http--log "Async response: %s" response)
               (when deadline-timer
                 (cancel-timer deadline-timer)
                 (setq deadline-timer nil))
@@ -282,7 +302,11 @@ the ways around the stall; an early release here is not."
     (cl-flet ((send-once (thunk)
                 (unless response-sent
                   (setq response-sent t)
-                  (funcall thunk))))
+                  (condition-case err
+                      (funcall thunk)
+                    (error
+                     (message "[MCP HTTP] Error sending response: %s"
+                              (error-message-string err)))))))
       (condition-case err
           (let ((response (mcp-server-lib-process-jsonrpc body)))
             (cond
@@ -298,58 +322,81 @@ the ways around the stall; an early release here is not."
               ;; restore would reintroduce the leak the guard above exists
               ;; to close, just on a narrower trigger.  Skip both.
               (unless response-sent
-                ;; Capture the timeout now: the var is re-read at fire
-                ;; time otherwise, so a value changed after arming (e.g.
-                ;; a test's `let' unwinding) would make the deadline
-                ;; report a duration it never actually waited.
-                (let ((timeout-seconds mcp-server-lib-http-async-timeout))
-                  (setq deadline-timer
-                        (run-at-time
-                         timeout-seconds nil
-                         (lambda ()
-                           (setq deadline-timer nil)
-                           (unless response-sent
-                             (setq response-sent t)
-                             (message
-                              "[MCP HTTP] Async deadline reached after %ss"
-                              timeout-seconds)
-                             ;; Same ordering requirement as the callback
-                             ;; path above: restore before the send-error
-                             ;; below, so a request the send's queue-drain
-                             ;; hands this connection to can never capture
-                             ;; our sentinel as its own `prev'.
-                             (mcp-server-lib-http--restore-sentinel
-                              proc own-sentinel prev-sentinel)
-                             (when (process-live-p proc)
-                               (condition-case err
-                                   (mcp-server-lib-http--send-error
-                                    proc 504
-                                    (format "Async operation timeout (%ss)"
-                                            timeout-seconds)
-                                    request-id)
-                                 ;; This send is the request's last chance
-                                 ;; at an answer -- `response-sent' is
-                                 ;; already t and the sentinel already
-                                 ;; restored, so nothing downstream will
-                                 ;; retry or notice.  A silent failure here
-                                 ;; is exactly the unanswered-request shape
-                                 ;; this deadline exists to eliminate.
-                                 (error
-                                  (message
-                                   "[MCP HTTP] Error sending deadline response: %s"
-                                   (error-message-string err))))))))))
-                (setq prev-sentinel (process-sentinel proc)
-                      own-sentinel
-                      (lambda (p event)
-                        (unless (string-prefix-p "open " event)
-                          (when deadline-timer
-                            (cancel-timer deadline-timer)
-                            (setq deadline-timer nil))
-                          (setq response-sent t)
-                          (mcp-server-lib-http--restore-sentinel
-                           proc own-sentinel prev-sentinel))
-                        (when prev-sentinel (funcall prev-sentinel p event))))
-                (set-process-sentinel proc own-sentinel)))
+                ;; Arming is two steps -- start the deadline timer, then
+                ;; chain the sentinel -- and either can throw (the second
+                ;; step reads and replaces PROC's sentinel, which a test
+                ;; or an unusual process state can poison).  A throw after
+                ;; the timer is already running would otherwise leak it:
+                ;; the crash this propagates to answers with a 500 and
+                ;; nothing else ever cancels a timer nobody else knows
+                ;; about, so it would sit in `timer-list' for the full
+                ;; timeout before firing into a no-op.  Catch here, cancel
+                ;; whatever got armed, and re-signal so the outer handler
+                ;; still produces the crash response.
+                (condition-case arm-err
+                    (progn
+                      ;; Capture the timeout now: the var is re-read at
+                      ;; fire time otherwise, so a value changed after
+                      ;; arming (e.g. a test's `let' unwinding) would make
+                      ;; the deadline report a duration it never actually
+                      ;; waited.
+                      (let ((timeout-seconds mcp-server-lib-http-async-timeout))
+                        (setq deadline-timer
+                              (run-at-time
+                               timeout-seconds nil
+                               (lambda ()
+                                 (setq deadline-timer nil)
+                                 (unless response-sent
+                                   (setq response-sent t)
+                                   (message
+                                    "[MCP HTTP] Async deadline reached after %ss"
+                                    timeout-seconds)
+                                   ;; Same ordering requirement as the
+                                   ;; callback path above: restore before
+                                   ;; the send-error below, so a request
+                                   ;; the send's queue-drain hands this
+                                   ;; connection to can never capture our
+                                   ;; sentinel as its own `prev'.
+                                   (mcp-server-lib-http--restore-sentinel
+                                    proc own-sentinel prev-sentinel)
+                                   (when (process-live-p proc)
+                                     (condition-case err
+                                         (mcp-server-lib-http--send-error
+                                          proc 200
+                                          mcp-server-lib-http-jsonrpc-error-timeout
+                                          (format "Async operation timeout (%ss)"
+                                                  timeout-seconds)
+                                          request-id)
+                                       ;; This send is the request's last
+                                       ;; chance at an answer --
+                                       ;; `response-sent' is already t and
+                                       ;; the sentinel already restored, so
+                                       ;; nothing downstream will retry or
+                                       ;; notice.  A silent failure here is
+                                       ;; exactly the unanswered-request
+                                       ;; shape this deadline exists to
+                                       ;; eliminate.
+                                       (error
+                                        (message
+                                         "[MCP HTTP] Error sending deadline response: %s"
+                                         (error-message-string err))))))))))
+                      (setq prev-sentinel (process-sentinel proc)
+                            own-sentinel
+                            (lambda (p event)
+                              (unless (string-prefix-p "open " event)
+                                (when deadline-timer
+                                  (cancel-timer deadline-timer)
+                                  (setq deadline-timer nil))
+                                (setq response-sent t)
+                                (mcp-server-lib-http--restore-sentinel
+                                 proc own-sentinel prev-sentinel))
+                              (when prev-sentinel (funcall prev-sentinel p event))))
+                      (set-process-sentinel proc own-sentinel))
+                  (error
+                   (when deadline-timer
+                     (cancel-timer deadline-timer)
+                     (setq deadline-timer nil))
+                   (signal (car arm-err) (cdr arm-err))))))
              ;; Normal response
              (response
               (send-once
@@ -362,16 +409,12 @@ the ways around the stall; an early release here is not."
                (lambda ()
                  (with-temp-buffer
                    (httpd-send-header proc "text/plain" 202)))))))
-        (json-error
-         (send-once
-          (lambda ()
-            (mcp-server-lib-http--send-error
-             proc 400 (format "Invalid JSON: %s" (error-message-string err))))))
         (error
          (send-once
           (lambda ()
             (mcp-server-lib-http--send-error
-             proc 500 (format "Internal error: %s" (error-message-string err))
+             proc 500 mcp-server-lib-jsonrpc-error-internal
+             (format "Internal error: %s" (error-message-string err))
              request-id))))))))
 
 (defun mcp-server-lib-http--handle-jsonrpc-request (proc request &optional session-id cwd)
@@ -403,7 +446,8 @@ to avoid blocking Emacs."
      ((string= method "POST")
       (if (string-empty-p body)
           (mcp-server-lib-http--send-error
-           proc 400 "Empty request body")
+           proc 400 mcp-server-lib-jsonrpc-error-invalid-request
+           "Empty request body")
         ;; Defer from httpd process filter to main thread event loop.
         (let ((sid session-id)
               (dir cwd))
@@ -415,7 +459,8 @@ to avoid blocking Emacs."
      ;; Reject other methods
      (t
       (mcp-server-lib-http--send-error
-       proc 405 "Method not allowed")))))
+       proc 405 mcp-server-lib-jsonrpc-error-invalid-request
+       "Method not allowed")))))
 
 (defun httpd/mcp/v1/messages (proc _uri-path _uri-query request)
   "Handle POST requests to /mcp/v1/messages endpoint.
