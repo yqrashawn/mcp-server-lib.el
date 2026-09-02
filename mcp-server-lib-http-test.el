@@ -531,7 +531,13 @@ file logs its own send failure, so a thunk that throws here must too."
                "\\[MCP HTTP\\] Error sending response"
                (substring (with-current-buffer (messages-buffer) (buffer-string))
                           (length messages-before))))
-            5)))
+            5))
+          ;; A genuinely broken send has no fallback: `send-once' marks
+          ;; the request sent before it ever calls the thunk, so nothing
+          ;; downstream retries it, and nothing else in this connection's
+          ;; life will write to it.  The client must see nothing at all,
+          ;; not a partial or malformed response.
+          (should (= 0 (mcp-server-lib-http-test--response-count proc))))
       (when (and proc (process-live-p proc)) (delete-process proc))
       (when (and proc (buffer-live-p (process-buffer proc)))
         (kill-buffer (process-buffer proc)))
@@ -539,21 +545,23 @@ file logs its own send failure, so a thunk that throws here must too."
       (ignore-errors (mcp-server-lib-stop)))))
 
 (ert-deftest mcp-server-lib-http-test-log-failure-during-callback-does-not-resurrect-request ()
-  "If logging an async response throws, the request must stay marked sent.
+  "A log write failing during an async callback must not lose the response.
 
-Moving `(setq response-sent t)' above the `--log' call closes this: if
-`--log' signals -- a broken file appender, say -- the throw escapes
-into `mcp-server-lib.el''s own retry handler, which calls this
+`mcp-server-lib-http--log' calls `lgr-debug', which macro-expands to
+`lgr-log' -- a removed log directory, a full disk, or a permissions
+change can make that call throw.  Before the fix `--log' had no guard
+of its own: the throw escaped past the `(cancel-timer ...)' and the
+`--send-response' call that follow it in the async callback, and from
+there into `mcp-server-lib.el''s own retry handler, which called this
 transport's response function a SECOND time with a synthetic error
-payload.  Before the fix `response-sent' was still nil at that point (it
-was set only after `--log' returned), so the guard treated the retry as
-a fresh, legitimate send and wrote it to the wire, resurrecting a
-request this connection may already have moved past -- exactly the
-wrong-request-gets-the-answer hazard `late-answer-is-dropped' exists to
-prevent.  After the fix the retry is correctly dropped as already
-answered, and nothing is written at all."
+payload -- but `response-sent' was already t by then, so the guard
+correctly dropped the retry as already-answered and the request went
+unanswered on the wire regardless.  After the fix `--log' catches the
+failure itself, so the callback's own send still happens and the retry
+path is never even reached."
   (setq mcp-server-lib-http-test--callback nil)
   (let ((mcp-server-lib-http-port mcp-server-lib-http-test--port)
+        (mcp-server-lib-http-log-requests t)
         (proc nil))
     (unwind-protect
         (progn
@@ -571,19 +579,20 @@ answered, and nothing is written at all."
                    "\"params\":{\"name\":\"slow_test_tool\",\"arguments\":{}}}"))
           (should (mcp-server-lib-http-test--wait
                    (lambda () mcp-server-lib-http-test--callback)))
-          (let ((poisoned t))
-            (cl-letf (((symbol-function 'mcp-server-lib-http--log)
-                       (lambda (&rest _)
-                         (when poisoned
-                           (setq poisoned nil)
-                           (error "poisoned --log")))))
-              (funcall mcp-server-lib-http-test--callback
-                       (json-encode
-                        '((jsonrpc . "2.0") (id . 66)
-                          (result . ((content . [((type . "text") (text . "done"))]))))))))
-          ;; give the retry every chance to write, then confirm it did not
-          (accept-process-output nil 0.3)
-          (should (= 0 (mcp-server-lib-http-test--response-count proc))))
+          ;; `lgr-debug' is a macro; it expands at compile time straight
+          ;; into a call to `lgr-log', so that -- not the macro name --
+          ;; is what must be poisoned to actually reach this call site.
+          (cl-letf (((symbol-function 'lgr-log)
+                     (lambda (&rest _) (error "poisoned lgr-log"))))
+            (funcall mcp-server-lib-http-test--callback
+                     (json-encode
+                      '((jsonrpc . "2.0") (id . 66)
+                        (result . ((content . [((type . "text") (text . "done"))])))))))
+          (should (mcp-server-lib-http-test--wait
+                   (lambda () (= 1 (mcp-server-lib-http-test--response-count proc)))))
+          (should (string-match-p
+                   "done"
+                   (mcp-server-lib-http-test--nth-response proc 1))))
       (when (and proc (process-live-p proc)) (delete-process proc))
       (when (and proc (buffer-live-p (process-buffer proc)))
         (kill-buffer (process-buffer proc)))

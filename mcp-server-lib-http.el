@@ -5,7 +5,7 @@
 ;; Author: Laurynas Biveinis <laurynas.biveinis@gmail.com>
 ;; Keywords: comm, tools
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1") (mcp-server-lib "0.2.0") (dash "2.20.0") (lgr "0") (simple-httpd "1.6"))
+;; Package-Requires: ((emacs "29.1") (mcp-server-lib "0.2.0") (dash "2.20.0") (lgr "0") (simple-httpd "1.6") (compat "31"))
 
 ;; This file is NOT part of GNU Emacs.
 
@@ -135,11 +135,22 @@ for everyone."
 
 (defun mcp-server-lib-http--log (message &rest args)
   "Log MESSAGE with ARGS if logging is enabled.
-Logs to `*Messages*' and to a rotating log file."
+Logs to `*Messages*' and to a rotating log file.
+Every failure in here -- a bad format string, or `lgr-debug' hitting
+the rotating file appender when its directory is gone, the disk is
+full, or permissions changed -- is caught and reported rather than
+let to propagate.  This function is called from the same path that
+answers an HTTP request and releases `simple-httpd''s per-connection
+`:request-active' slot; a throw from a *diagnostic* log call must
+never be able to skip that release or a timer cancel downstream of
+it, no matter where a future call site places it."
   (when mcp-server-lib-http-log-requests
-    (let ((formatted (apply #'format message args)))
-      (message "[MCP HTTP] %s" formatted)
-      (lgr-debug mcp-server-lib-http-logger "%s" formatted))))
+    (condition-case err
+        (let ((formatted (apply #'format message args)))
+          (message "[MCP HTTP] %s" formatted)
+          (lgr-debug mcp-server-lib-http-logger "%s" formatted))
+      (error
+       (message "[MCP HTTP] Logging failed: %s" (error-message-string err))))))
 
 (defconst mcp-server-lib-http-jsonrpc-error-timeout -32000
   "JSON-RPC 2.0 error code for a request the async deadline abandoned.

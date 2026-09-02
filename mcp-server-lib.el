@@ -5,7 +5,7 @@
 ;; Author: Laurynas Biveinis <laurynas.biveinis@gmail.com>
 ;; Keywords: comm, tools
 ;; Version: 0.2.0
-;; Package-Requires: ((emacs "27.1") (gptel "0.9") (dash "2.20.0") (lgr "0") (simple-httpd "1.6"))
+;; Package-Requires: ((emacs "29.1") (gptel "0.9") (dash "2.20.0") (lgr "0") (simple-httpd "1.6") (compat "31"))
 ;; URL: https://github.com/laurynas-biveinis/mcp-server-lib.el
 
 ;; This file is NOT part of GNU Emacs.

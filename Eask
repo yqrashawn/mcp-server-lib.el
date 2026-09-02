@@ -41,8 +41,16 @@
 (source "gnu")
 (source "melpa")
 
-(depends-on "emacs" "27.1")
+(depends-on "emacs" "29.1")
 (depends-on "gptel" "0.9")
 (depends-on "dash" "2.20.0")
 (depends-on "lgr" "0")
 (depends-on "simple-httpd" "1.6")
+;; Not used directly -- `simple-httpd' 1.6 requires it itself, but its
+;; own transitive resolution has proven unreliable in practice (a fresh
+;; `package-activate-all' on Emacs 29 has been observed to fail outright
+;; with "Required package `compat-31' is unavailable", cascading into
+;; every package that needs `simple-httpd' or `transient').  Declaring
+;; it here makes eask install it as a first-class dependency instead of
+;; leaving it to chance.
+(depends-on "compat" "31")
