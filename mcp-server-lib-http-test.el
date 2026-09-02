@@ -504,5 +504,246 @@ impossible."
       (ignore-errors (mcp-server-lib-unregister-tool "sync_test_tool"))
       (ignore-errors (mcp-server-lib-stop)))))
 
+(ert-deftest mcp-server-lib-http-test-crash-while-arming-marks-answered ()
+  "A crash while arming the async wait must still mark the request answered,
+so a callback that fires later cannot write a second response onto a slot
+the crash's own error response has since handed to a different request.
+
+Reproduces the exact sequence this closes: the handler stashes its
+callback and returns `:async-pending', something throws inside that
+branch (here, a poisoned `run-at-time' standing in for the deadline
+timer), the outer `error' handler answers with a 500 through
+`httpd-send-header' -- releasing `:request-active' and dispatching
+request 33, parked behind it -- and only then does request 21's stashed
+callback fire.  Before the fix, four of the seven paths that can write a
+response never set `response-sent', including this one: the late
+callback's own guard never tripped, and it corrupted request 33's answer.
+
+A single request without a follow-up cannot show this: `httpd-send-header'
+already refuses to write once `:request-active' is nil again, so a late
+answer landing with nothing else queued is caught by that check anyway
+and proves nothing about `response-sent' specifically -- exactly the
+vacuous-pass shape `late-answer-is-dropped' already had to design around
+for the deadline path."
+  (setq mcp-server-lib-http-test--callback nil)
+  (let ((mcp-server-lib-http-port mcp-server-lib-http-test--port)
+        (proc nil)
+        (real-run-at-time (symbol-function 'run-at-time))
+        (crashed-callback nil))
+    (unwind-protect
+        (progn
+          (mcp-server-lib-register-tool
+           #'mcp-server-lib-http-test--slow-tool
+           :id "slow_test_tool"
+           :async t
+           :description "Test tool that answers only when the test releases it.")
+          (mcp-server-lib-start)
+          (mcp-server-lib-http-start :port mcp-server-lib-http-test--port)
+          (setq proc (mcp-server-lib-http-test--connect))
+          ;; request 21: async, and its own dispatch crashes while arming
+          (cl-letf (((symbol-function 'run-at-time)
+                     (lambda (time &rest args)
+                       ;; Let the framework's own "defer to main thread"
+                       ;; scheduling through unharmed -- it always uses a
+                       ;; delay of 0 -- and poison only the deadline's
+                       ;; arm, the one call that uses the real timeout.
+                       (if (eq time 0)
+                           (apply real-run-at-time time args)
+                         (error "poisoned run-at-time")))))
+            (mcp-server-lib-http-test--send
+             proc
+             (concat "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\","
+                     "\"params\":{\"name\":\"slow_test_tool\",\"arguments\":{}}}"))
+            ;; the handler stashed its callback before the crash
+            (should (mcp-server-lib-http-test--wait
+                     (lambda () mcp-server-lib-http-test--callback)))
+            (setq crashed-callback mcp-server-lib-http-test--callback)
+            ;; the crash answers with an internal-error response and
+            ;; releases the slot
+            (should (mcp-server-lib-http-test--wait
+                     (lambda () (= 1 (mcp-server-lib-http-test--response-count proc)))))
+            (should (string-match-p
+                     "\"code\":-32603"
+                     (mcp-server-lib-http-test--nth-response proc 1))))
+          ;; request 33 takes the slot and parks, holding it while we act
+          (setq mcp-server-lib-http-test--callback nil)
+          (mcp-server-lib-http-test--send
+           proc
+           (concat "{\"jsonrpc\":\"2.0\",\"id\":33,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"slow_test_tool\",\"arguments\":{}}}"))
+          (should (mcp-server-lib-http-test--wait
+                   (lambda () mcp-server-lib-http-test--callback)))
+          ;; request 21 answers now, far too late, onto request 33's slot
+          (funcall crashed-callback
+                   (json-encode
+                    '((jsonrpc . "2.0") (id . 21)
+                      (result . ((content . [((type . "text") (text . "late"))]))))))
+          ;; wait for the second response the guard has to prevent
+          (mcp-server-lib-http-test--wait
+           (lambda () (> (mcp-server-lib-http-test--response-count proc) 1))
+           1)
+          (should (= 1 (mcp-server-lib-http-test--response-count proc)))
+          ;; and request 33 must still get its own answer, uncorrupted
+          (funcall mcp-server-lib-http-test--callback
+                   (json-encode
+                    '((jsonrpc . "2.0") (id . 33)
+                      (result . ((content . [((type . "text") (text . "own-answer"))]))))))
+          (should (mcp-server-lib-http-test--wait
+                   (lambda ()
+                     (= 2 (mcp-server-lib-http-test--response-count proc)))))
+          (let ((second-response (mcp-server-lib-http-test--nth-response proc 2)))
+            (should (string-match-p "own-answer" second-response))
+            (should-not (string-match-p "late" second-response))))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when (and proc (buffer-live-p (process-buffer proc)))
+        (kill-buffer (process-buffer proc)))
+      (ignore-errors (mcp-server-lib-http-stop))
+      (ignore-errors (mcp-server-lib-unregister-tool "slow_test_tool"))
+      (ignore-errors (mcp-server-lib-stop)))))
+
+(ert-deftest mcp-server-lib-http-test-deadline-preserves-request-id ()
+  "The deadline's error response must carry the original request's id.
+
+Before the fix `mcp-server-lib-http--send-error' hardcoded `:null', so a
+client correlating responses by id could never match a timeout back to
+the request that produced it -- unlike the stdio transport, which
+already threads the real id through its own timeout path."
+  (let ((mcp-server-lib-http-port mcp-server-lib-http-test--port)
+        (mcp-server-lib-http-async-timeout 1)
+        (proc nil))
+    (unwind-protect
+        (progn
+          (mcp-server-lib-register-tool
+           #'mcp-server-lib-http-test--abandon-tool
+           :id "abandon_test_tool"
+           :async t
+           :description "Test tool that never answers.")
+          (mcp-server-lib-start)
+          (mcp-server-lib-http-start :port mcp-server-lib-http-test--port)
+          (setq proc (mcp-server-lib-http-test--connect))
+          (mcp-server-lib-http-test--send
+           proc
+           (concat "{\"jsonrpc\":\"2.0\",\"id\":777,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"abandon_test_tool\",\"arguments\":{}}}"))
+          (should (mcp-server-lib-http-test--wait
+                   (lambda ()
+                     (string-match-p
+                      "\"error\"" (mcp-server-lib-http-test--received proc)))
+                   5))
+          (should (string-match-p
+                   "\"id\":777" (mcp-server-lib-http-test--received proc)))
+          (should-not (string-match-p
+                       "\"id\":null" (mcp-server-lib-http-test--received proc))))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when (and proc (buffer-live-p (process-buffer proc)))
+        (kill-buffer (process-buffer proc)))
+      (ignore-errors (mcp-server-lib-http-stop))
+      (ignore-errors (mcp-server-lib-unregister-tool "abandon_test_tool"))
+      (ignore-errors (mcp-server-lib-stop)))))
+
+(ert-deftest mcp-server-lib-http-test-deadline-send-failure-is-logged ()
+  "A deadline whose own error response fails to send must log why.
+
+Before the fix, `ignore-errors' swallowed that failure silently:
+`response-sent' was already t and the sentinel already restored, so
+nothing downstream would ever retry or notice -- the request was simply
+never answered, with no diagnostic anywhere."
+  (let ((mcp-server-lib-http-port mcp-server-lib-http-test--port)
+        (mcp-server-lib-http-async-timeout 1)
+        (proc nil)
+        (messages-before nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'mcp-server-lib-http--send-error)
+                   (lambda (&rest _) (error "send-error boom"))))
+          (mcp-server-lib-register-tool
+           #'mcp-server-lib-http-test--abandon-tool
+           :id "abandon_test_tool"
+           :async t
+           :description "Test tool that never answers.")
+          (mcp-server-lib-start)
+          (mcp-server-lib-http-start :port mcp-server-lib-http-test--port)
+          (setq messages-before
+                (with-current-buffer (messages-buffer) (buffer-string)))
+          (setq proc (mcp-server-lib-http-test--connect))
+          (mcp-server-lib-http-test--send
+           proc
+           (concat "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"abandon_test_tool\",\"arguments\":{}}}"))
+          (should
+           (mcp-server-lib-http-test--wait
+            (lambda ()
+              (string-match-p
+               "\\[MCP HTTP\\] Error sending deadline response"
+               (substring (with-current-buffer (messages-buffer) (buffer-string))
+                          (length messages-before))))
+            5)))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when (and proc (buffer-live-p (process-buffer proc)))
+        (kill-buffer (process-buffer proc)))
+      (ignore-errors (mcp-server-lib-http-stop))
+      (ignore-errors (mcp-server-lib-unregister-tool "abandon_test_tool"))
+      (ignore-errors (mcp-server-lib-stop)))))
+
+(ert-deftest mcp-server-lib-http-test-deadline-reports-armed-timeout ()
+  "The deadline's own diagnostic must report the delay it actually waited,
+not whatever `mcp-server-lib-http-async-timeout' holds when it fires.
+
+Before the fix the lambda closed over the *symbol*, re-reading the
+customizable variable at fire time; mutating it after arming -- as this
+test does, and as a live `customize-set-variable' or a dynamically scoped
+`let' elsewhere could -- made the reported number diverge from the delay
+that actually elapsed.
+
+Uses the stash-callback tool, not the abandon tool, so there is a
+positive signal (the stash) that arming has already happened -- and
+therefore already captured the timeout -- before the mutation below.
+Mutating blind, with no such signal, would race the deferred dispatch:
+land before arming and the mutated value would be the one captured,
+proving nothing wrong even on the unfixed code."
+  (setq mcp-server-lib-http-test--callback nil)
+  (let ((mcp-server-lib-http-port mcp-server-lib-http-test--port)
+        (mcp-server-lib-http-async-timeout 1)
+        (proc nil)
+        (messages-before nil))
+    (unwind-protect
+        (progn
+          (mcp-server-lib-register-tool
+           #'mcp-server-lib-http-test--slow-tool
+           :id "slow_test_tool"
+           :async t
+           :description "Test tool that answers only when the test releases it.")
+          (mcp-server-lib-start)
+          (mcp-server-lib-http-start :port mcp-server-lib-http-test--port)
+          (setq messages-before
+                (with-current-buffer (messages-buffer) (buffer-string)))
+          (setq proc (mcp-server-lib-http-test--connect))
+          (mcp-server-lib-http-test--send
+           proc
+           (concat "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"tools/call\","
+                   "\"params\":{\"name\":\"slow_test_tool\",\"arguments\":{}}}"))
+          ;; the handler has stashed its callback, so the deadline is
+          ;; already armed and has already captured the timeout in effect
+          (should (mcp-server-lib-http-test--wait
+                   (lambda () mcp-server-lib-http-test--callback)))
+          ;; mutate the timeout now, after arming, before it fires
+          (setq mcp-server-lib-http-async-timeout 999)
+          (should (mcp-server-lib-http-test--wait
+                   (lambda ()
+                     (string-match-p
+                      "\"error\"" (mcp-server-lib-http-test--received proc)))
+                   5))
+          (let ((logged (substring
+                         (with-current-buffer (messages-buffer) (buffer-string))
+                         (length messages-before))))
+            (should (string-match-p "Async deadline reached after 1s" logged))
+            (should-not
+             (string-match-p "Async deadline reached after 999s" logged))))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when (and proc (buffer-live-p (process-buffer proc)))
+        (kill-buffer (process-buffer proc)))
+      (ignore-errors (mcp-server-lib-http-stop))
+      (ignore-errors (mcp-server-lib-unregister-tool "slow_test_tool"))
+      (ignore-errors (mcp-server-lib-stop)))))
+
 (provide 'mcp-server-lib-http-test)
 ;;; mcp-server-lib-http-test.el ends here
