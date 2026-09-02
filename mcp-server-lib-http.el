@@ -82,30 +82,28 @@ Uses `mcp-server-lib-log-directory' for the directory."
   :type 'string
   :group 'mcp-server-lib-http)
 
-(defcustom mcp-server-lib-http-async-timeout 300
+(defcustom mcp-server-lib-http-async-timeout 176400
   "Seconds to wait for an async tool's callback over the HTTP transport.
 
 Deliberately a separate variable from `mcp-server-lib-async-timeout',
 which governs the stdio transport's blocking poll, so the two transports
-can be tuned independently; the default matches it here because nothing
-about the HTTP path argues for a different number out of the box.  On
-expiry the request is answered with a JSON-RPC error, which releases
-`simple-httpd''s per-connection slot and lets queued requests through.
+can be tuned independently.  The default is 49 hours: long enough to
+outlast a tool such as `ask_user_question' that waits on a human to
+respond, rather than one that answers promptly.  On expiry the request
+is answered with a JSON-RPC error, which releases `simple-httpd''s
+per-connection slot and lets queued requests through.
 
 This is also the longest a keep-alive connection can be blocked: until
 that release, `simple-httpd' won't dispatch anything else queued behind
 this request on the same connection (see
-`mcp-server-lib-http--dispatch-main-thread').  Raising this value is not
-merely holding one idle file descriptor open for longer -- it directly
-extends that worst-case stall on every later request queued behind this
-one.  It can also defeat itself: a client with its own, shorter read
+`mcp-server-lib-http--dispatch-main-thread').  A client that shares one
+connection across requests will therefore stall behind a parked prompt
+for as long as this variable allows -- lower it if your client does
+that.  A client that gets a fresh connection per request is unaffected.
+This value can also defeat itself: a client with its own, shorter read
 timeout gives up and closes the socket before this deadline ever fires,
 so the caller sees a raw connection failure instead of the JSON-RPC
-timeout error this variable exists to produce.  A deployment that
-genuinely needs a long wait -- a tool that pauses for a human, say --
-should raise this in its own configuration, matched to that client's own
-timeout, rather than the library defaulting to one deployment's number
-for everyone."
+timeout error this variable exists to produce."
   :type 'number
   :group 'mcp-server-lib-http)
 
@@ -424,7 +422,7 @@ the ways around the stall; an early release here is not."
          (send-once
           (lambda ()
             (mcp-server-lib-http--send-error
-             proc 500 mcp-server-lib-jsonrpc-error-internal
+             proc 200 mcp-server-lib-jsonrpc-error-internal
              (format "Internal error: %s" (error-message-string err))
              request-id))))))))
 

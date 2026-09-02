@@ -46,8 +46,6 @@ jobs:
           version: "snapshot"
 
       - name: Run tests
-        env:
-          EMACS_TEST_JUNIT_REPORT: mcp-server-lib-test.xml
         run: |
           eask clean all
           eask package
@@ -59,15 +57,19 @@ jobs:
           eask run script test
 
       - name: Upload test results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-results-${{ matrix.os }}-emacs-${{ matrix.emacs_version }}
-          path: mcp-server-lib-test.xml
+          path: |
+            mcp-server-lib-http-test.xml
+            mcp-server-lib-test.xml
           retention-days: 7
 
       - name: Test Report
+        if: always()
         uses: dorny/test-reporter@v1 # zizmor: ignore[unpinned-uses]
         with:
           name: Test Results - ${{ matrix.os }} - Emacs ${{ matrix.emacs_version }}
-          path: mcp-server-lib-test.xml
+          path: mcp-server-lib-http-test.xml,mcp-server-lib-test.xml
           reporter: java-junit

@@ -19,8 +19,11 @@
 ;; parse on main (pre-existing, unrelated to the http transport), and
 ;; with `&&' a flake in the http suite skipped it outright, so its own
 ;; JUnit report was never even attempted.  `;' always attempts both;
-;; the trailing `test' reports failure if either did.
-(script "test" "eask test ert mcp-server-lib-http-test.el; s1=$?; eask test ert mcp-server-lib-test.el; s2=$?; test \"$s1\" -eq 0 -a \"$s2\" -eq 0")
+;; the trailing `test' reports failure if either did.  Each invocation
+;; sets its own `EMACS_TEST_JUNIT_REPORT' rather than inheriting one
+;; shared value from the CI step's env, so the second suite's report
+;; can no longer overwrite the first's.
+(script "test" "EMACS_TEST_JUNIT_REPORT=mcp-server-lib-http-test.xml eask test ert mcp-server-lib-http-test.el; s1=$?; EMACS_TEST_JUNIT_REPORT=mcp-server-lib-test.xml eask test ert mcp-server-lib-test.el; s2=$?; test \"$s1\" -eq 0 -a \"$s2\" -eq 0")
 
 (script "org-lint" 
         (concat "emacs -Q --batch "

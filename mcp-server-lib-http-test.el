@@ -608,8 +608,9 @@ the crash's own error response has since handed to a different request.
 Reproduces the exact sequence this closes: the handler stashes its
 callback and returns `:async-pending', something throws inside that
 branch (here, a poisoned `run-at-time' standing in for the deadline
-timer), the outer `error' handler answers with a 500 through
-`httpd-send-header' -- releasing `:request-active' and dispatching
+timer), the outer `error' handler answers with a 200 carrying a
+JSON-RPC error body through `httpd-send-header' -- releasing
+`:request-active' and dispatching
 request 33, parked behind it -- and only then does request 21's stashed
 callback fire.  Before the fix, four of the seven paths that can write a
 response never set `response-sent', including this one: the late
@@ -655,12 +656,16 @@ for the deadline path."
                      (lambda () mcp-server-lib-http-test--callback)))
             (setq crashed-callback mcp-server-lib-http-test--callback)
             ;; the crash answers with an internal-error response and
-            ;; releases the slot
+            ;; releases the slot.  It must be a 200: a Streamable-HTTP
+            ;; client that checks `response.ok' before parsing would
+            ;; otherwise never read the body and lose request 21's id,
+            ;; the same reasoning `deadline-answers-with-200-and-distinct-
+            ;; code' applies to the deadline path.
             (should (mcp-server-lib-http-test--wait
                      (lambda () (= 1 (mcp-server-lib-http-test--response-count proc)))))
-            (should (string-match-p
-                     "\"code\":-32603"
-                     (mcp-server-lib-http-test--nth-response proc 1))))
+            (let ((response (mcp-server-lib-http-test--nth-response proc 1)))
+              (should (string-match-p "\\`HTTP/1\\.1 200" response))
+              (should (string-match-p "\"code\":-32603" response))))
           ;; request 33 takes the slot and parks, holding it while we act
           (setq mcp-server-lib-http-test--callback nil)
           (mcp-server-lib-http-test--send
@@ -705,7 +710,7 @@ for the deadline path."
 leak in that test.  Here the arm succeeds first -- `process-sentinel'
 throws only once that has already happened -- so the async-pending
 branch has to notice the timer it already created and cancel it before
-signalling on to the crash's own 500 response.  Without that guard the
+signalling on to the crash's own 200 response.  Without that guard the
 timer would sit in `timer-list' for the full
 `mcp-server-lib-http-async-timeout' delay before firing into a no-op."
   (setq mcp-server-lib-http-test--callback nil)
