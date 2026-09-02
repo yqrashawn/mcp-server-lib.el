@@ -992,7 +992,7 @@ from a function loaded from bytecode rather than interpreted elisp."
          (inputSchema . ((type . "object")))))
        ("test-tool-2" .
         ((description . "Second tool for testing")
-         (inputSchema . ((type . "object")))))))))))
+         (inputSchema . ((type . "object")))))))))
 
 (ert-deftest mcp-server-lib-test-tools-list-zero ()
   "Test the `tools/list` method returning empty array with no tools."

@@ -20,10 +20,6 @@ jobs:
           - "snapshot"
           - "30.1"
           - "29.4"
-          - "28.2"
-        include:
-          - os: ubuntu-latest
-            emacs_version: "27.2"
 
     permissions:
       contents: read
@@ -50,8 +46,6 @@ jobs:
           version: "snapshot"
 
       - name: Run tests
-        env:
-          EMACS_TEST_JUNIT_REPORT: ${{ (matrix.emacs_version != '27.2' && matrix.emacs_version != '28.2') && 'mcp-server-lib-test.xml' || '' }}
         run: |
           eask clean all
           eask package
@@ -63,17 +57,19 @@ jobs:
           eask run script test
 
       - name: Upload test results
+        if: always()
         uses: actions/upload-artifact@v4
-        if: matrix.emacs_version != '27.2' && matrix.emacs_version != '28.2'
         with:
           name: test-results-${{ matrix.os }}-emacs-${{ matrix.emacs_version }}
-          path: mcp-server-lib-test.xml
+          path: |
+            mcp-server-lib-http-test.xml
+            mcp-server-lib-test.xml
           retention-days: 7
 
       - name: Test Report
+        if: always()
         uses: dorny/test-reporter@v1 # zizmor: ignore[unpinned-uses]
-        if: matrix.emacs_version != '27.2' && matrix.emacs_version != '28.2'
         with:
           name: Test Results - ${{ matrix.os }} - Emacs ${{ matrix.emacs_version }}
-          path: mcp-server-lib-test.xml
+          path: mcp-server-lib-http-test.xml,mcp-server-lib-test.xml
           reporter: java-junit
