@@ -12,6 +12,7 @@
 (package-file "mcp-server-lib.el")
 (files "mcp-server-lib-commands.el"
        "mcp-server-lib-ert.el"
+       "mcp-server-lib-http.el"
        "emacs-mcp-stdio.sh")
 
 (script "test" "eask test ert mcp-server-lib-http-test.el && eask test ert mcp-server-lib-test.el")
@@ -37,3 +38,6 @@
 
 (depends-on "emacs" "27.1")
 (depends-on "gptel" "0.9")
+(depends-on "dash" "2.20.0")
+(depends-on "lgr" "0")
+(depends-on "simple-httpd" "1.5.1")
