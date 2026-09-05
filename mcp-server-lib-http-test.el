@@ -954,5 +954,203 @@ proving nothing wrong even on the unfixed code."
       (ignore-errors (mcp-server-lib-unregister-tool "slow_test_tool"))
       (ignore-errors (mcp-server-lib-stop)))))
 
+;;; roots/list
+
+(defun mcp-server-lib-http-test--send-with (proc body headers)
+  "Send BODY to PROC as a keep-alive POST, with extra HEADERS.
+HEADERS is a string of already-formatted \"Name: value\\r\\n\" lines."
+  (process-send-string
+   proc
+   (format (concat "POST /mcp/v1/messages HTTP/1.1\r\n"
+                   "Host: 127.0.0.1\r\n"
+                   "Content-Type: application/json\r\n"
+                   "Content-Length: %d\r\n"
+                   "Connection: keep-alive\r\n%s\r\n%s")
+           (string-bytes body) headers body)))
+
+(defconst mcp-server-lib-http-test--init-with-roots
+  (concat "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":"
+          "{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"roots\":"
+          "{\"listChanged\":true}},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}")
+  "An initialize request from a client that declares the roots capability.")
+
+(defconst mcp-server-lib-http-test--init-no-roots
+  (concat "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":"
+          "{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},"
+          "\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}")
+  "An initialize request from a client that declares no capabilities.")
+
+(defmacro mcp-server-lib-http-test--with-server (&rest body)
+  "Run BODY with the MCP HTTP server started on the test port."
+  (declare (indent 0))
+  `(let ((mcp-server-lib-http-port mcp-server-lib-http-test--port))
+     (unwind-protect
+         (progn
+           (mcp-server-lib-start)
+           (mcp-server-lib-http-start :port mcp-server-lib-http-test--port)
+           ,@body)
+       (ignore-errors (mcp-server-lib-http-stop))
+       (ignore-errors (mcp-server-lib-stop)))))
+
+(ert-deftest mcp-server-lib-http-test-roots-not-solicited-without-capability ()
+  "A client declaring no roots must get the plain JSON initialize, at once.
+
+This is the invariant that protects existing clients.  The MCP Java SDK
+declares no capabilities and gives initialization 10 seconds by default,
+so soliciting roots from it would stall the handshake past its own
+deadline and fail the connection outright -- turning a feature it never
+asked for into an outage."
+  (let ((proc nil))
+    (unwind-protect
+        (mcp-server-lib-http-test--with-server
+          (setq proc (mcp-server-lib-http-test--connect))
+          (mcp-server-lib-http-test--send
+           proc mcp-server-lib-http-test--init-no-roots)
+          (should (mcp-server-lib-http-test--wait
+                   (lambda ()
+                     (string-match-p "\"protocolVersion\""
+                                     (mcp-server-lib-http-test--received proc)))
+                   2))
+          (let ((got (mcp-server-lib-http-test--received proc)))
+            (should (string-match-p "Content-Type: application/json" got))
+            (should-not (string-match-p "text/event-stream" got))
+            (should-not (string-match-p "roots/list" got))))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when (and proc (buffer-live-p (process-buffer proc)))
+        (kill-buffer (process-buffer proc))))))
+
+(ert-deftest mcp-server-lib-http-test-roots-solicited-and-recorded ()
+  "A roots-capable client is asked for roots, and they reach the next request.
+
+Covers the whole round trip: the SSE answer to initialize, the
+server-initiated `roots/list' on that stream, the client's answer
+arriving as a separate POST, and the roots then being visible to a later
+request that identifies itself only by `Mcp-Session-Id'."
+  (let ((proc nil) (sid nil))
+    (unwind-protect
+        (mcp-server-lib-http-test--with-server
+          (setq proc (mcp-server-lib-http-test--connect))
+          (mcp-server-lib-http-test--send
+           proc mcp-server-lib-http-test--init-with-roots)
+          ;; The server asks for roots before answering initialize.
+          (should (mcp-server-lib-http-test--wait
+                   (lambda ()
+                     (string-match-p "roots/list"
+                                     (mcp-server-lib-http-test--received proc)))
+                   2))
+          (let ((got (mcp-server-lib-http-test--received proc)))
+            (should (string-match-p "Content-Type: text/event-stream" got))
+            (should (string-match-p "Mcp-Session-Id: " got))
+            ;; initialize must NOT be answered yet -- roots come first.
+            (should-not (string-match-p "protocolVersion" got))
+            (setq sid (when (string-match "Mcp-Session-Id: \\([^\r\n]+\\)" got)
+                        (match-string 1 got))))
+          (should sid)
+          ;; Answer roots/list on a second connection, as a real client would.
+          (let ((c2 (mcp-server-lib-http-test--connect)))
+            (unwind-protect
+                (progn
+                  (mcp-server-lib-http-test--send
+                   c2 (concat "{\"jsonrpc\":\"2.0\",\"id\":\"srv-1\",\"result\":"
+                              "{\"roots\":[{\"uri\":\"file:///tmp/roots-test\"}]}}"))
+                  (should (mcp-server-lib-http-test--wait
+                           (lambda ()
+                             (string-match-p
+                              "202" (mcp-server-lib-http-test--received c2)))
+                           2)))
+              (when (process-live-p c2) (delete-process c2))
+              (when (buffer-live-p (process-buffer c2))
+                (kill-buffer (process-buffer c2)))))
+          ;; Only now does initialize complete, on the original stream.
+          (should (mcp-server-lib-http-test--wait
+                   (lambda ()
+                     (string-match-p "protocolVersion"
+                                     (mcp-server-lib-http-test--received proc)))
+                   2))
+          ;; The roots were recorded against the session, and resolve to a
+          ;; directory a tool handler would actually run in.
+          (let ((mcp-server-lib--request-roots
+                 (plist-get (gethash sid mcp-server-lib-http--sessions) :roots)))
+            (should (equal (mcp-server-lib-roots-directory) "/tmp/roots-test/"))))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when (and proc (buffer-live-p (process-buffer proc)))
+        (kill-buffer (process-buffer proc))))))
+
+(ert-deftest mcp-server-lib-http-test-roots-timeout-still-answers-initialize ()
+  "A client that never answers `roots/list' still completes its handshake.
+Failing to learn the roots is a missing optimisation, not a fatal error;
+letting it strand the handshake would be far worse than having no roots."
+  (let ((proc nil)
+        (mcp-server-lib-http-roots-timeout 0.5))
+    (unwind-protect
+        (mcp-server-lib-http-test--with-server
+          (setq proc (mcp-server-lib-http-test--connect))
+          (mcp-server-lib-http-test--send
+           proc mcp-server-lib-http-test--init-with-roots)
+          ;; Never answer roots/list; the deadline must complete initialize.
+          (should (mcp-server-lib-http-test--wait
+                   (lambda ()
+                     (string-match-p "protocolVersion"
+                                     (mcp-server-lib-http-test--received proc)))
+                   4)))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when (and proc (buffer-live-p (process-buffer proc)))
+        (kill-buffer (process-buffer proc))))))
+
+(ert-deftest mcp-server-lib-http-test-roots-stream-releases-slot ()
+  "The SSE initialize must release `:request-active' like any other response.
+`httpd-send-header' is what normally clears the slot and drains the
+queue; an SSE answer bypasses it, so it has to do both by hand or the
+connection serves nothing else for the rest of its life."
+  (let ((proc nil)
+        (mcp-server-lib-http-roots-timeout 0.5))
+    (unwind-protect
+        (mcp-server-lib-http-test--with-server
+          (setq proc (mcp-server-lib-http-test--connect))
+          (mcp-server-lib-http-test--send
+           proc mcp-server-lib-http-test--init-with-roots)
+          (should (mcp-server-lib-http-test--wait
+                   (lambda ()
+                     (string-match-p "protocolVersion"
+                                     (mcp-server-lib-http-test--received proc)))
+                   4))
+          (should (mcp-server-lib-http-test--server-conns))
+          (should (seq-every-p
+                   (lambda (p) (null (process-get p :request-active)))
+                   (mcp-server-lib-http-test--server-conns))))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when (and proc (buffer-live-p (process-buffer proc)))
+        (kill-buffer (process-buffer proc))))))
+
+(ert-deftest mcp-server-lib-http-test-sessions-bounded-oldest-first ()
+  "The session table stays under its cap, and evicts the oldest first.
+Newest-first or wholesale eviction would be worse than useless here:
+roots are solicited once, at initialize, so a client whose entry is
+dropped never gets asked again and silently falls back to whatever the
+directory function ends on."
+  (let ((mcp-server-lib-http--sessions (make-hash-table :test 'equal))
+        (mcp-server-lib-http-max-sessions 3))
+    ;; Distinct, increasing :created stamps so age order is unambiguous.
+    (mcp-server-lib-http--record-session "old" '(((uri . "file:///a"))))
+    (sleep-for 0.01)
+    (mcp-server-lib-http--record-session "mid" '(((uri . "file:///b"))))
+    (sleep-for 0.01)
+    (mcp-server-lib-http--record-session "new" '(((uri . "file:///c"))))
+    (should (= 3 (hash-table-count mcp-server-lib-http--sessions)))
+    ;; Fourth entry pushes past the cap: the oldest goes, the rest stay.
+    (sleep-for 0.01)
+    (mcp-server-lib-http--record-session "newest" '(((uri . "file:///d"))))
+    (should (= 3 (hash-table-count mcp-server-lib-http--sessions)))
+    (should-not (gethash "old" mcp-server-lib-http--sessions))
+    (should (gethash "mid" mcp-server-lib-http--sessions))
+    (should (gethash "new" mcp-server-lib-http--sessions))
+    (should (gethash "newest" mcp-server-lib-http--sessions))
+    ;; A surviving entry keeps its roots intact, not just its key.
+    (should (equal "/b/"
+                   (let ((mcp-server-lib--request-roots
+                          (plist-get (gethash "mid" mcp-server-lib-http--sessions)
+                                     :roots)))
+                     (mcp-server-lib-roots-directory))))))
+
 (provide 'mcp-server-lib-http-test)
 ;;; mcp-server-lib-http-test.el ends here

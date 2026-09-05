@@ -47,6 +47,8 @@
 
 (require 'cl-lib)
 (require 'json)
+(require 'seq)
+(require 'url-util)
 (require 'gptel)
 (require 'gptel-openai)
 (require 'lgr)
@@ -246,6 +248,34 @@ tool handlers run in the requested directory.  When
 `mcp-server-lib-default-directory-function' is set, it can read this
 variable to decide the final `default-directory'.  When no custom
 function is set, this value is used directly as `default-directory'.")
+
+(defvar mcp-server-lib--request-roots nil
+  "Filesystem roots the client declared, for the current MCP request.
+A list of alists as returned by the client's `roots/list' response, each
+with a `uri' (a `file://' URI) and an optional `name'.  Transport layers
+that can solicit roots -- currently only HTTP -- bind this per request
+from the roots recorded for the request's MCP session.
+
+Roots are advisory: the spec defines them as the boundaries a server may
+operate within, and specifies no ordering and no notion of a working
+directory.  So `mcp-server-lib--request-cwd', which names one exactly,
+takes precedence wherever both are available.")
+
+(defun mcp-server-lib-roots-directory ()
+  "Return a local directory from `mcp-server-lib--request-roots', or nil.
+Picks the first root whose `uri' parses as a local `file://' path.  The
+spec guarantees no ordering, so this is a heuristic: clients observed so
+far (Claude Code, the MCP Java SDK) list the launch directory first and
+any additional directories after it."
+  (seq-some
+   (lambda (root)
+     (let ((uri (alist-get 'uri root)))
+       (when (and (stringp uri) (string-prefix-p "file://" uri))
+         (condition-case nil
+             (file-name-as-directory
+              (url-unhex-string (substring uri (length "file://"))))
+           (error nil)))))
+   mcp-server-lib--request-roots))
 
 (defvar mcp-server-lib--async-response-fn nil
   "When non-nil, async tool results are delivered via this function.
@@ -980,6 +1010,10 @@ Returns a list of all registered resource templates."
                       ;; Backward compat: call with no args if fn doesn't accept session-id
                       (funcall mcp-server-lib-default-directory-function))))
               mcp-server-lib--request-cwd
+              ;; Roots only say which directories the server may operate in,
+              ;; with no ordering and no designated primary, so they rank
+              ;; below `--request-cwd', which names the directory exactly.
+              (mcp-server-lib-roots-directory)
               default-directory))
          (mcp-server-lib--request-cwd default-directory))
     (if is-async

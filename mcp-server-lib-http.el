@@ -186,6 +186,180 @@ and get that default."
     (httpd-send-header proc "application/json" 200
                        :Access-Control-Allow-Origin "*")))
 
+;;; MCP sessions and server-initiated requests
+;;
+;; The transport can send the client a JSON-RPC *request* -- currently only
+;; `roots/list' -- but MCP gives a server exactly one place to put one: an SSE
+;; stream.  Either the stream a client opens with GET, or the stream that
+;; answers a client's POST.  We use the second: "the server MAY send JSON-RPC
+;; requests and notifications before sending the JSON-RPC response" to a POSTed
+;; request.  That needs no GET route (we answer 405, which the spec allows) and
+;; no registry of open streams, because the stream is the connection already in
+;; hand.  It stays open for one round trip, not indefinitely.
+;;
+;; The client's answer arrives as a separate POST, so it has to be correlated
+;; back: `--pending' maps our outbound id to the waiter, and `--sessions' keeps
+;; the resulting roots so later requests -- which arrive on other connections --
+;; can still see them, keyed by the `Mcp-Session-Id' we mint at initialize and
+;; the client echoes back.
+
+(defcustom mcp-server-lib-http-roots-timeout 10
+  "Seconds to wait for a client's `roots/list' answer during initialize.
+Unlike `mcp-server-lib-http-async-timeout', which waits on a human, this
+waits on a program, so it is short.  On expiry the initialize response is
+sent anyway with no roots recorded: failing to learn the roots must never
+cost the client its handshake."
+  :type 'number
+  :group 'mcp-server-lib-http)
+
+(defcustom mcp-server-lib-http-max-sessions 512
+  "Hard cap on remembered MCP sessions.
+MCP has no session-close hook to evict on, and clients that never send an
+HTTP DELETE -- which is all of them observed so far -- leave their entry
+behind forever, so a long-lived Emacs would otherwise accumulate one per
+`initialize'.  Entries are tiny; this is a safety valve, not a working-set
+limit."
+  :type 'integer
+  :group 'mcp-server-lib-http)
+
+(defvar mcp-server-lib-http--sessions (make-hash-table :test 'equal)
+  "Hash of MCP session id -> plist, currently (:roots ROOTS :created TIME).")
+
+(defun mcp-server-lib-http--record-session (session-id roots)
+  "Remember ROOTS for SESSION-ID, evicting the oldest sessions past the cap.
+Eviction is oldest-first rather than wholesale, because roots are asked
+for once, at initialize, and never again: dropping a live session's entry
+would not make it re-resolve, it would silently demote that client to
+whatever fallback `mcp-server-lib-default-directory-function' ends on --
+the wrong-directory failure this feature exists to remove.  Evicting the
+oldest confines that to the sessions least likely to still be running."
+  (let ((over (- (1+ (hash-table-count mcp-server-lib-http--sessions))
+                 mcp-server-lib-http-max-sessions)))
+    (when (> over 0)
+      (let (by-age)
+        (maphash (lambda (sid plist)
+                   (push (cons sid (plist-get plist :created)) by-age))
+                 mcp-server-lib-http--sessions)
+        (setq by-age (sort by-age (lambda (a b) (time-less-p (cdr a) (cdr b)))))
+        (dolist (entry (seq-take by-age over))
+          (remhash (car entry) mcp-server-lib-http--sessions)))))
+  (puthash session-id (list :roots roots :created (current-time))
+           mcp-server-lib-http--sessions))
+
+(defvar mcp-server-lib-http--pending (make-hash-table :test 'equal)
+  "Hash of our outbound JSON-RPC request id -> callback of one argument.
+The callback receives the parsed `result' of the client's response, or
+nil if the request timed out, errored, or the connection died.")
+
+(defvar mcp-server-lib-http--outbound-id-counter 0
+  "Counter behind `mcp-server-lib-http--next-outbound-id'.")
+
+(defun mcp-server-lib-http--uuid ()
+  "Return a fresh MCP session id.
+The spec asks for a globally unique, cryptographically secure id made of
+visible ASCII, so this is `secure-hash' over random state rather than
+`random' alone."
+  (secure-hash 'sha256 (format "%s%s%s" (random) (current-time) (emacs-pid))
+               nil nil nil))
+
+(defun mcp-server-lib-http--next-outbound-id ()
+  "Return a fresh id for a server-initiated JSON-RPC request.
+Rendered as a string with an `srv-' prefix.  JSON-RPC gives each side of
+a connection its own id space, so a server id is never required to avoid
+the client's -- but making them visibly disjoint means a mix-up shows up
+as a miss in `mcp-server-lib-http--pending' rather than as a plausible
+collision that resolves the wrong waiter."
+  (format "srv-%d" (cl-incf mcp-server-lib-http--outbound-id-counter)))
+
+(defun mcp-server-lib-http--header (request name)
+  "Return header NAME from simple-httpd REQUEST, case-insensitively, or nil.
+HTTP header names are case-insensitive and `simple-httpd' preserves
+whatever casing the client sent, so an `assoc' on one spelling silently
+misses clients that choose another."
+  (cadr (seq-find (lambda (h) (and (stringp (car h))
+                                   (string-equal-ignore-case (car h) name)))
+                  request)))
+
+(defun mcp-server-lib-http--parse (body)
+  "Parse BODY as JSON, returning an alist, or nil if it will not parse."
+  (condition-case nil
+      (json-read-from-string (decode-coding-string body 'utf-8 t))
+    (error nil)))
+
+(defun mcp-server-lib-http--response-p (json)
+  "Return non-nil if JSON is a JSON-RPC response rather than a request.
+A response carries an id and a `result' or `error' and no `method'."
+  (and (consp json)
+       (null (alist-get 'method json))
+       (alist-get 'id json)
+       (or (assq 'result json) (assq 'error json))))
+
+(defun mcp-server-lib-http--wants-roots-p (json)
+  "Return non-nil if JSON is an initialize request declaring the roots capability.
+Soliciting roots from a client that never declared them is not merely
+useless, it is harmful: the client will not answer, so the handshake
+stalls until `mcp-server-lib-http-roots-timeout'.  A client with a
+shorter initialization timeout of its own -- the MCP Java SDK defaults to
+10 seconds -- gives up first and the connection fails outright."
+  (and (equal (alist-get 'method json) "initialize")
+       (assq 'roots (alist-get 'capabilities (alist-get 'params json)))
+       t))
+
+(defun mcp-server-lib-http--resolve-pending (json)
+  "Deliver JSON, a client JSON-RPC response, to its waiter.
+Returns non-nil if a waiter was found.  An unmatched id is dropped: it
+means the waiter already gave up, so there is nothing left to answer."
+  (let* ((id (format "%s" (alist-get 'id json)))
+         (callback (gethash id mcp-server-lib-http--pending)))
+    (when callback
+      (remhash id mcp-server-lib-http--pending)
+      (funcall callback (alist-get 'result json))
+      t)))
+
+;;; SSE framing
+;;
+;; `httpd-send-header' cannot serve these: it always computes a
+;; `Content-Length' from the response buffer, which ends the body at the first
+;; frame.  So the header is written by hand -- and with it the responsibility
+;; `httpd-send-header' would otherwise discharge, namely clearing
+;; `:request-active' and draining `:request-queue' when the response is
+;; complete.  Skipping that release wedges the connection for every later
+;; request on it, so `--sse-close' does both explicitly.
+
+(defun mcp-server-lib-http--sse-open (proc session-id)
+  "Begin a chunked `text/event-stream' response on PROC for SESSION-ID."
+  (process-send-string
+   proc
+   (concat "HTTP/1.1 200 OK\r\n"
+           "Content-Type: text/event-stream\r\n"
+           "Cache-Control: no-cache\r\n"
+           "Transfer-Encoding: chunked\r\n"
+           (format "Mcp-Session-Id: %s\r\n" session-id)
+           (if mcp-server-lib-http-cors-enabled
+               "Access-Control-Allow-Origin: *\r\n"
+             "")
+           "\r\n")))
+
+(defun mcp-server-lib-http--sse-send (proc data)
+  "Send DATA, a JSON string, as one SSE event in one HTTP chunk on PROC."
+  (let* ((frame (encode-coding-string (format "data: %s\n\n" data) 'utf-8 t))
+         (chunk (concat (format "%x\r\n" (length frame)) frame "\r\n")))
+    (process-send-string proc chunk)))
+
+(defun mcp-server-lib-http--sse-close (proc request)
+  "End the chunked response on PROC and release its `simple-httpd' slot.
+REQUEST decides whether the connection survives: honour a client's
+`Connection: close' by deleting PROC, otherwise release the slot and let
+any queued request through, exactly as `httpd-send-header' would."
+  (process-send-string proc "0\r\n\r\n")
+  (if (httpd--connection-close-p request)
+      (delete-process proc)
+    (process-put proc :request-active nil)
+    ;; simple-httpd only grew a request queue in 1.6; on 1.5.1 there is
+    ;; nothing to drain and the slot never existed to begin with.
+    (when (fboundp 'httpd--pop-request)
+      (httpd--pop-request proc))))
+
 ;;; Request handlers
 
 (defun mcp-server-lib-http--extract-tool-name (body)
@@ -224,10 +398,80 @@ it alone rather than clobbering it."
   (when (and own (eq (process-sentinel proc) own))
     (set-process-sentinel proc prev)))
 
-(defun mcp-server-lib-http--dispatch-main-thread (proc body sid dir)
+(defun mcp-server-lib-http--dispatch-initialize-roots (proc body request)
+  "Answer an initialize BODY on PROC with SSE, soliciting `roots/list' first.
+REQUEST is the simple-httpd request.  Writes the `roots/list' request
+into the stream, waits for the client to POST its answer on another
+connection, records the roots against a freshly minted MCP session, then
+writes the InitializeResult and closes.
+
+The initialize response is sent exactly once, by whichever of three
+things happens first: the client answers, the wait times out, or the
+connection dies.  Losing that race in any direction would leave a client
+hung on a handshake that never completes."
+  (let* ((session-id (mcp-server-lib-http--uuid))
+         (outbound-id (mcp-server-lib-http--next-outbound-id))
+         (finished nil)
+         (timer nil)
+         (prev-sentinel nil)
+         (own-sentinel nil)
+         (finish
+          (lambda (roots)
+            (unless finished
+              (setq finished t)
+              (when timer (cancel-timer timer) (setq timer nil))
+              (remhash outbound-id mcp-server-lib-http--pending)
+              (mcp-server-lib-http--restore-sentinel
+               proc own-sentinel prev-sentinel)
+              (mcp-server-lib-http--record-session session-id roots)
+              (mcp-server-lib-http--log
+               "Session %s roots: %s" session-id (or roots "none"))
+              (when (process-live-p proc)
+                (condition-case err
+                    (let ((mcp-server-lib--request-roots roots))
+                      (mcp-server-lib-http--sse-send
+                       proc (mcp-server-lib-process-jsonrpc body))
+                      (mcp-server-lib-http--sse-close proc request))
+                  (error
+                   (message "[MCP HTTP] Error completing initialize: %s"
+                            (error-message-string err)))))))))
+    (mcp-server-lib-http--sse-open proc session-id)
+    (puthash outbound-id
+             (lambda (result) (funcall finish (alist-get 'roots result)))
+             mcp-server-lib-http--pending)
+    ;; Arm the give-up paths before asking, not after: a client that answers
+    ;; synchronously would otherwise find no timer to cancel and no sentinel
+    ;; to restore, and a throw between asking and arming would strand the
+    ;; handshake with nothing left to complete it.
+    (setq timer (run-at-time mcp-server-lib-http-roots-timeout nil
+                             (lambda ()
+                               (mcp-server-lib-http--log
+                                "roots/list timed out after %ss"
+                                mcp-server-lib-http-roots-timeout)
+                               (funcall finish nil))))
+    (setq prev-sentinel (process-sentinel proc)
+          own-sentinel
+          (lambda (p event)
+            (unless (string-prefix-p "open " event)
+              (funcall finish nil))
+            (when prev-sentinel (funcall prev-sentinel p event))))
+    (set-process-sentinel proc own-sentinel)
+    (condition-case err
+        (mcp-server-lib-http--sse-send
+         proc (json-encode `((jsonrpc . "2.0")
+                             (id . ,outbound-id)
+                             (method . "roots/list"))))
+      (error
+       (message "[MCP HTTP] Error sending roots/list: %s"
+                (error-message-string err))
+       (funcall finish nil)))))
+
+(defun mcp-server-lib-http--dispatch-main-thread (proc body sid dir request)
   "Process JSON-RPC BODY on the main thread.
 PROC is the HTTP connection process.  SID and DIR are the session-id
-and working directory.
+and working directory.  REQUEST is the simple-httpd request, needed to
+read the `Mcp-Session-Id' header and to honour `Connection: close' when
+the answer is an SSE stream.
 
 An async tool's response is delayed, not streamed: nothing is written
 until the callback fires, and then it goes out through
@@ -246,6 +490,11 @@ serialising them.  `Connection: close', or keeping async ops short, are
 the ways around the stall; an early release here is not."
   (let* ((mcp-server-lib--request-session-id sid)
          (mcp-server-lib--request-cwd dir)
+         (mcp-server-lib--request-roots
+          (plist-get (gethash (mcp-server-lib-http--header
+                               request "Mcp-Session-Id")
+                              mcp-server-lib-http--sessions)
+                     :roots))
          (response-sent nil)
          (deadline-timer nil)
          (prev-sentinel nil)
@@ -317,8 +566,28 @@ the ways around the stall; an early release here is not."
                      (message "[MCP HTTP] Error sending response: %s"
                               (error-message-string err)))))))
       (condition-case err
-          (let ((response (mcp-server-lib-process-jsonrpc body)))
+          (let ((json (mcp-server-lib-http--parse body)))
             (cond
+             ;; A JSON-RPC response from the client, answering something we
+             ;; asked.  The core dispatcher keys on `method' alone, so a
+             ;; response reaching it would come back "Method not found: nil".
+             ;; Per spec a response or notification is answered 202, no body.
+             ((mcp-server-lib-http--response-p json)
+              (mcp-server-lib-http--resolve-pending json)
+              (send-once
+               (lambda ()
+                 (with-temp-buffer
+                   (httpd-send-header proc "text/plain" 202)))))
+             ;; Initialize from a roots-capable client: answer over SSE so we
+             ;; can ask for its roots before completing the handshake.  Every
+             ;; other request, and every client that did not declare roots,
+             ;; takes the unchanged path below.
+             ((mcp-server-lib-http--wants-roots-p json)
+              (setq response-sent t)
+              (mcp-server-lib-http--dispatch-initialize-roots proc body request))
+             (t
+              (let ((response (mcp-server-lib-process-jsonrpc body)))
+                (cond
              ;; Async tool - the callback sends the response later.  Write
              ;; nothing now: no headers, no chunked framing, no keepalive.
              ((eq response :async-pending)
@@ -406,18 +675,18 @@ the ways around the stall; an early release here is not."
                      (cancel-timer deadline-timer)
                      (setq deadline-timer nil))
                    (signal (car arm-err) (cdr arm-err))))))
-             ;; Normal response
-             (response
-              (send-once
-               (lambda ()
-                 (mcp-server-lib-http--log "Response: %s" response)
-                 (mcp-server-lib-http--send-response proc response))))
-             ;; Notification - no response needed
-             (t
-              (send-once
-               (lambda ()
-                 (with-temp-buffer
-                   (httpd-send-header proc "text/plain" 202)))))))
+                 ;; Normal response
+                 (response
+                  (send-once
+                   (lambda ()
+                     (mcp-server-lib-http--log "Response: %s" response)
+                     (mcp-server-lib-http--send-response proc response))))
+                 ;; Notification - no response needed
+                 (t
+                  (send-once
+                   (lambda ()
+                     (with-temp-buffer
+                       (httpd-send-header proc "text/plain" 202))))))))))
         (error
          (send-once
           (lambda ()
@@ -459,11 +728,12 @@ to avoid blocking Emacs."
            "Empty request body")
         ;; Defer from httpd process filter to main thread event loop.
         (let ((sid session-id)
-              (dir cwd))
+              (dir cwd)
+              (req request))
           (run-at-time
            0 nil
            (lambda ()
-             (mcp-server-lib-http--dispatch-main-thread proc body sid dir))))))
+             (mcp-server-lib-http--dispatch-main-thread proc body sid dir req))))))
 
      ;; Reject other methods
      (t
